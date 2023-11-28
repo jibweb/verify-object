@@ -151,7 +151,7 @@ def load_objects_models(object_names, objects_path, cmap=plt.cm.tab20(range(20))
             textures = TexturesVertex(verts_features=torch.from_numpy(np.array(cmap[oi*2+ii][:3]))[None, None, :]
                                     .expand(-1, verts.shape[0], -1).type_as(verts).to(device)
             )
-            print(cmap[oi*2+ii][:3])
+            # print(cmap[oi*2+ii][:3])
             mesh = Meshes(
                 verts=[verts.to(device)],
                 faces=[faces_idx.verts_idx.to(device)],
@@ -224,7 +224,7 @@ def scene_optimization(logger, t_mag, isbop, scene_path, mask_path, scene_number
     return best_metrics, iter_values
 
 
-def optimization_step(model, reference_rgb, reference_mask, T_init_list, T_igt_list, ref_gray_tensor,
+def optimization_step(model, reference_rgb, reference_depth, reference_mask, T_init_list, T_igt_list, ref_gray_tensor,
         optimizer_type, max_num_iterations, early_stopping_loss, lr,
         logger, im_id, debug_flag, img_debug_name,
         isbop):
@@ -266,8 +266,9 @@ def optimization_step(model, reference_rgb, reference_mask, T_init_list, T_igt_l
         # update
 
         optimizer.zero_grad()
-        loss, image, signed_dis, diff_rend_loss, signed_dis_loss, contour_loss = model(
+        loss, image, signed_dis, diff_rend_loss, signed_dis_loss, contour_loss, depth_loss = model(
             ref_gray_tensor,
+            reference_depth,
             f"{img_debug_name}/{im_id}/{i}.png",
             debug_flag,
             isbop)  # Calling forward function
@@ -276,7 +277,7 @@ def optimization_step(model, reference_rgb, reference_mask, T_init_list, T_igt_l
         optimizer.step()
 
         # import pdb; pdb.set_trace()
-        print(image.shape)
+
         # out = torchvision.utils.make_grid(image, nrow=2, padding=5)
         # out_np = K.utils.tensor_to_image(torch.movedim(image, 3, 1))
         # cmap = plt.cm.tab20(range(20))
@@ -297,7 +298,7 @@ def optimization_step(model, reference_rgb, reference_mask, T_init_list, T_igt_l
 
         out_np = K.utils.tensor_to_image(torch.movedim(image[..., :3], 3, 1))
         plt.imshow(out_np); plt.savefig("/code/src/optim{:05d}.png".format(i))
-        print(diff_rend_loss, signed_dis_loss, contour_loss)
+        print("LOSSES:", diff_rend_loss, signed_dis_loss, contour_loss, depth_loss)
 
         # early stopping
         if loss.item() < early_stopping_loss:

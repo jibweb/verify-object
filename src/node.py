@@ -1,528 +1,396 @@
-import cv2
-import pytorch3d.transforms
+import argparse
+# import pandas as pd
+import numpy as np
+import os
 import torch
-import torch.nn as nn
-from trimesh import Trimesh
-import open3d
-from src.contour.contour import imsavePNG
+import yaml
+from pytorch3d.io import load_obj
+from pytorch3d.structures import Meshes
+from pytorch3d.renderer import TexturesVertex
+from pose.model import OptimizationModel
+import pose.object_pose as object_pose
+import json
+from collision.environment import scene_point_clouds
+from collision.plane_detector import PlaneDetector
+from src.contour.contour import compute_sdf_image
+from utility.logger import Logger
+import config
+import trimesh
+from matplotlib import pyplot as plt
+import cv2
+
+from actionlib import SimpleActionServer
+import rospy
+import ros_numpy
+from geometry_msgs.msg import Pose
+from sensor_msgs.msg import Image, CameraInfo, RegionOfInterest
+from tracebot_msgs.msg import VerifyObjectAction, VerifyObjectGoal, VerifyObjectResult
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-from pytorch3d.transforms import (
-    matrix_to_quaternion, quaternion_to_matrix, so3_log_map, so3_exp_map, se3_log_map, se3_exp_map,
-    matrix_to_euler_angles, euler_angles_to_matrix
-)
-from pytorch3d.renderer import (
-    RasterizationSettings, MeshRenderer, MeshRasterizer,
-    PointLights, BlendParams, SoftSilhouetteShader, SoftGouraudShader, HardPhongShader,
-)
-from pytorch3d.renderer.mesh.renderer import MeshRendererWithFragments
-from pytorch3d.utils import cameras_from_opencv_projection
-from pytorch3d.structures import Meshes, join_meshes_as_scene, join_meshes_as_batch
-from src.collision import transformations as tra
-import numpy as np
-import cv2 as cv
-import open3d as o3d
-from src.contour import contour
-
-import matplotlib.pyplot as plt
+torch.autograd.set_detect_anomaly(True)  # To check whether we have nan or inf in our gradient calculation
 
 
-class OptimizationModel(nn.Module):
-    def __init__(self, meshes, intrinsics_dict, representation='q', image_scale=1, loss_function_num=1, BOP=False):
-        super().__init__()
-        self.meshes = meshes
-        self.meshes_name = None
-        self.sampled_meshes = None
-        self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
-        self.loss_func_num = loss_function_num
-        self.camera_ins = None
+SUPPORTED_OBJECTS = [
+    'container'
+]
 
-        self.meshes_diameter = None
+INTERNAL_TO_PROJECT_NAMES = {
+    'container': 'Canister',
+}
 
-        # Plane (Table in this dataset) point clouds and transformation matrix
-        self.plane_pcd = None
-        self.plane_T_matrix = None
+PROJECT_TO_INTERNAL_NAMES = {
+    v: k for (k, v) in INTERNAL_TO_PROJECT_NAMES.items()
+}
 
-        # Camera intrinsic
-        cam = o3d.camera.PinholeCameraIntrinsic()
 
-        if BOP :
-            cam.intrinsic_matrix = (np.reshape(np.asarray(intrinsics_dict), (3, 3))).tolist()
-            cam.height = 540
-            cam.width = 720
-            self.camera_ins = cam
-            # Scale
-            # - speed-up rendering
-            # - need to adapt intrinsics accordingly
-            width, height = 720 // image_scale, 540 // image_scale
-            intrinsics = np.asarray(intrinsics_dict).reshape(3, 3)
-            intrinsics[:2, :] //= image_scale
+class VerifyPose:
 
+    def __init__(self, name):
+
+        # Reading camera intrinsics
+        intrinsics_from_topic = False
+        if intrinsics_from_topic:
+            self.camera_info_topic = rospy.get_param('/locateobject/camera_info_topic',
+                                                    '/camera/color/camera_info')
+            rospy.loginfo(f"[{name}] Waiting for camera info ...")
+            self.camera_info = rospy.wait_for_message(self.camera_info_topic, CameraInfo)
+            rospy.loginfo(f"[{name}] Camera info received")
         else:
-            cam.intrinsic_matrix = (np.reshape(np.asarray(intrinsics_dict["camera_matrix"]), (3, 3))).tolist()
-            cam.height = intrinsics_dict["image_height"]
-            cam.width = intrinsics_dict["image_width"]
-            self.camera_ins = cam
-            # Scale
-            # - speed-up rendering
-            # - need to adapt intrinsics accordingly
-            width, height = intrinsics_dict['image_width'] // image_scale, intrinsics_dict['image_height'] // image_scale
-            intrinsics = np.asarray(intrinsics_dict['camera_matrix']).reshape(3, 3)
-            intrinsics[:2, :] //= image_scale
-
-        # Camera
-        # - "assume that +X points left, and +Y points up and +Z points out from the image plane"
-        # - see https://github.com/facebookresearch/pytorch3d/blob/main/docs/notes/cameras.md
-        # - see https://github.com/facebookresearch/pytorch3d/blob/main/docs/notes/renderer_getting_started.md
-        # - this is different from, e.g., OpenCV -> inverting focal length achieves the coordinate flip (hacky solution)
-        # - see https://github.com/facebookresearch/pytorch3d/issues/522#issuecomment-762793832
-        intrinsics[0, 0] *= -1  # Based on the differentiation between the coordinate systems: negative focal length
-        intrinsics[1, 1] *= -1
-        intrinsics = intrinsics.astype(np.float32)
-        cameras = cameras_from_opencv_projection(R=torch.from_numpy(np.eye(4, dtype=np.float32)[None, ...]),
-                                                 tvec=torch.from_numpy(np.asarray([[0, 0, 0]]).astype(np.float32)),
-                                                 camera_matrix=torch.from_numpy(intrinsics[:3, :3][None, ...]),
-                                                 image_size=torch.from_numpy(
-                                                     np.asarray([[height, width]]).astype(np.float32)))
-        self.cameras = cameras.to(device)
-
-        # SoftRas-style rendering
-        # - [faces_per_pixel] faces are blended
-        # - [sigma, gamma] controls opacity and sharpness of edges
-        # - If [bin_size] and [max_faces_per_bin] are None (=default), coarse-to-fine rasterization is used.
-        blend_params = BlendParams(sigma=1e-5, gamma=1e-5, background_color=(0.0, 0.0, 0.0))  # TODO vary this, faces_per_pixel etc. to find good value
-        soft_raster_settings = RasterizationSettings(
-            image_size=(height, width),
-            blur_radius=np.log(1. / 1e-4 - 1.) * blend_params.sigma,
-            faces_per_pixel=100,
-            perspective_correct=True, # TODO: Correct?
-        )
-        lights = PointLights(device=device, location=((0.0, 0.0, 0.0),), ambient_color=((1.0, 1.0, 1.0),),
-                             diffuse_color=((0.0, 0.0, 0.0),), specular_color=((0.0, 0.0, 0.0),),
-                             )  # at origin = camera center
-        self.ren_opt = MeshRendererWithFragments(
-            rasterizer=MeshRasterizer(
-                cameras=self.cameras,
-                raster_settings=soft_raster_settings
-            ),
-            # shader=SoftSilhouetteShader(blend_params=blend_params)
-            shader=SoftGouraudShader(blend_params=blend_params, device=device, cameras=self.cameras, lights=lights)
-        )
-
-        # Simple Phong-shaded renderer
-        # - faster for visualization
-        hard_raster_settings = RasterizationSettings(
-            image_size=(height, width),
-            blur_radius=0.0,
-            faces_per_pixel=1,
-        )
-        self.ren_vis = MeshRenderer(
-            rasterizer=MeshRasterizer(
-                cameras=self.cameras,
-                raster_settings=hard_raster_settings
-            ),
-            shader=HardPhongShader(device=device, cameras=self.cameras, lights=lights)
-        )
-
-        # Placeholders for optimization parameters and the reference image
-        # - rotation matrix must be orthogonal (i.e., element of SO(3)) - easier to use quaternion
-        self.representation = representation
-        if self.representation == 'se3':
-            self.log_list = None
-        elif self.representation == 'so3':
-            self.r_list = None
-            self.t_list = None
-        elif self.representation == 'q':
-            self.q_list = None
-            self.t_list = None
-        elif self.representation == 'in-plane':
-            # TODO dummies
-            self.scale_rotation = 10  # bigger impact of rotation st it's not dominated by translation
-        self.image_ref = None  # Image mask reference
-
-    def init(self, image_ref, T_init_list, T_plane=None): # TODO : Did I do it correctly here?
-        self.image_ref = torch.from_numpy(image_ref.astype(np.float32)).to(device)
-        if self.representation == 'se3':
-            self.log_list = nn.Parameter(torch.stack([(se3_log_map(T_init)) for T_init in T_init_list]))
-        elif self.representation == 'so3':
-            self.r_list = nn.Parameter(torch.stack([(so3_log_map(T_init[:, :3, :3])) for T_init in T_init_list]))
-            self.t_list = nn.Parameter(torch.stack([(T_init[:, 3, :3]) for T_init in T_init_list]))
-        elif self.representation == 'q':  # [q, t] representation
-            self.q_list = nn.Parameter(torch.stack([(matrix_to_quaternion(T_init[:, :3, :3])) for T_init in T_init_list]))
-            self.t_list = nn.Parameter(torch.stack([(T_init[:, 3, :3]) for T_init in T_init_list]))
-        # elif self.representation == 'in-plane': # TODO: Check for in-plane how should this change ?
-        #     # in this representation, we only update two delta values
-        #     # - rz = in-plane z rotation, txy = in-plane xy translation
-        #     # - they are applied on top of T_init in place space
-        #     assert T_plane is not None
-        #     self.T_plane, self.T_plane_inv = T_plane, T_plane.inverse()
-        #     self.T_init, self.T_init_inplane = T_init, T_init @ self.T_plane_inv
-        #     self.rz = nn.Parameter(torch.zeros((T_plane.shape[0]), dtype=torch.float32, device=device))
-        #     self.txy = nn.Parameter(torch.zeros((T_plane.shape[0], 2), dtype=torch.float32, device=device))
+            camera_intr_path = os.path.join(config.PATH_DATASET_TRACEBOT, 'camera_d435.yaml')
+            intrinsics_yaml = yaml.load(open(camera_intr_path, 'r'), Loader=yaml.FullLoader)
+            self.camera_info = CameraInfo()
+            self.camera_info.K = intrinsics_yaml['camera_matrix']
+            self.camera_info.height = intrinsics_yaml["image_height"]
+            self.camera_info.width = intrinsics_yaml["image_width"]
 
 
-    def get_R_t(self): # TODO: Check other representations, does it work?? ** Use torch.stack
-        if self.representation == 'se3': #TODO: adapt this
-            self.log_list
-            T = se3_exp_map(self.log)
-            return T[:, :3, :3], T[:, 3, :3]
-        elif self.representation == 'so3': #TODO: adapt this
-            return so3_exp_map(self.r), self.t
-        elif self.representation == 'q': #TODO: Is this correct?
-            return torch.stack([quaternion_to_matrix(q) for q in self.q_list]), self.t_list
-        elif self.representation == 'in-plane': #TODO: adapt this, no idea how
-            eulers = matrix_to_euler_angles(self.T_init_inplane[:, :3, :3], "XYZ")
-            eulers[:, 2] += self.rz * self.scale_rotation
-            T = self.T_init_inplane.clone()
-            T[:, :3, :3] = euler_angles_to_matrix(eulers, "XYZ")
-            T[:, 3, :2] += self.txy
-            T = T @ self.T_plane
-            return T[:, :3, :3], T[:, 3, :3]
+        self.viz_pub = rospy.Publisher(f"/{name}/debug_visualization", Image, queue_size=10, latch=True)
 
-    def get_transform(self): # TODO: Is it correct?
-        T_list = []
-        r_list, t_list = self.get_R_t()
-        for i in range(len(r_list)):
-            T = torch.eye(4, device=device)[None, ...]
-            T[:, :3, :3] = r_list[i]
-            T[:, 3, :3] = t_list[i]
-            T_list.append(T)
-        return T_list
-
-    def signed_dis(self, isbop=False,k=10):
-        """
-        Calculating the signed distance of an object and the plane (The table)
-        :return: two torch arrays with the length of number of points, showing the distance of that point and whether it
-        is an intersection point or not
-        """
-        points = torch.cat([torch.tensor(self.sampled_meshes[i][None, ...], dtype=torch.float ,device=device) for i in range(len(self.sampled_meshes))],dim=0)# shape (num of meshes, num point in each obj , 6 (coordinates and norms))
-        estimated_trans_matrixes = torch.cat([T.transpose(-2, -1) for T in self.get_transform()], dim=0) # Transposed because of the open3d and pytorch difference
-
-        TOL_CONTACT = 0.01
-
-        # === 1) all objects into plane space
-        plane_T_matrix = torch.inverse(self.plane_T_matrix)
-        transome_matrixes = plane_T_matrix @ estimated_trans_matrixes
-
-        points_in_plane = (transome_matrixes[:, :3, :3] @ points[..., :3].transpose(2, 1)).transpose(2, 1) + transome_matrixes[ :, :3, 3][:, None, :]
-
-        # TODO_Done if this is only for debugging, I'd comment it out st you save some time converting between GPU tensor and CPU/o3d point cloud
-        # points_in_plane_array = points_in_plane[..., :3].cpu().detach().numpy()
-        # pcd1 = o3d.geometry.PointCloud()
-        # pcd2 = o3d.geometry.PointCloud()
-        # pcd1.points = o3d.utility.Vector3dVector(points_in_plane_array[0])
-        # pcd2.points = o3d.utility.Vector3dVector(points_in_plane_array[1])
-        # o3d.visualization.draw_geometries([pcd1, pcd2])
-
-        # === 2) get signed distance to plane
-        signed_distance = points_in_plane[..., 2].clone() # shape (1, N)
-        supported = torch.ones_like(signed_distance)
+        self.plane_model = None
 
 
-        # others_indices = [[1], [0]] # TODO : correct? Change it from hard code
-        others_indices = [list(range(len(self.sampled_meshes))) for i in range(len(self.sampled_meshes))]
-        [others_indices[i].remove(i) for i in range(len(others_indices))]
-
-        if len(others_indices) > 0:  # === 3) get signed distance to other objects in the scene
-            # remove scaling (via normalization) for rotation of the normal vectors
-            targets_in_plane = points_in_plane.clone()
-            normals_in_plane = points[..., 3:6]
-            targets_in_plane = torch.cat([targets_in_plane, normals_in_plane], dim=-1) # The points are in the plane
-            # space, but the norms for each individual object does not depend on other object and shows the outside
-            # of the object
-
-            batch_signed_distances = []
-            batch_support = []
-            for b, other_indices in enumerate(others_indices):
-                num_other = len(other_indices)
-
-                # get k nearest neighbors in each of the other objects
-                distances, nearests = [], []
-                for o in other_indices:
-                    dist, idx = tra.nearest_neighbor(points_in_plane[o, ..., :3][None, ...],
-                                                     points_in_plane[b, ..., :3][None, ...], k=k)
-                    near = targets_in_plane[o][idx[0]]  # shape (k, num points, 3)
-                    distances.append(dist)
-                    nearests.append(near[None, ...])
-                if num_other == 0:  # add plane distance instead (doesn't change min)
-                    batch_signed_distances.append(signed_distance[b][None, ...])
-                    batch_support.append(torch.ones_like(signed_distance[b][None, ...]))
-                    continue
-                distances = torch.cat(distances, dim=0)  # [num_other] x k x N
-                nearests = torch.cat(nearests, dim=0)  # [num_other] x k x N x 6
-
-                # check if query is inside or outside based on surface normal
-                surface_normals = nearests[..., 3:6] # shape (num_other, k, N, 3)
-                gradients = nearests[..., :3] - points_in_plane[b][None, :, :3]  # points towards surface (from b to o)
-                gradients = gradients / torch.norm(gradients, dim=-1)[..., None]
-
-                # # Debugging
-                if torch.any(torch.isnan(nearests[..., :3])):
-                    print("nearest :(")
-                if torch.any(torch.isnan(gradients)):
-                    print("gradient :(")
-                if torch.any(torch.isnan(torch.norm(gradients, dim=-1)[..., None])):
-                    print("gradient norm :(")
-
-                # points_in_plane_array = points_in_plane[..., :3].cpu().detach().numpy()
-                # nearest_array = nearests[0, 0, :, :3].cpu().detach().numpy()
-                # pcd1 = o3d.geometry.PointCloud()
-                # pcd2 = o3d.geometry.PointCloud()
-                # pcd3 = o3d.geometry.PointCloud()
-                # pcd1.points = o3d.utility.Vector3dVector(points_in_plane_array[b])
-                # pcd1.normals = o3d.utility.Vector3dVector(gradients[0, 0, :, :3].cpu().detach().numpy())
-                # pcd2.normals = o3d.utility.Vector3dVector(surface_normals[0, 0, :, :3].cpu().detach().numpy())
-                # pcd2.points = o3d.utility.Vector3dVector(points_in_plane_array[o-1])
-                # pcd3.points = o3d.utility.Vector3dVector(nearest_array)
-                # pcd2.paint_uniform_color([1, 0.706, 0])
-                # pcd1.paint_uniform_color([1, 0, 0])
-                # pcd3.paint_uniform_color([0, 0, 0])
-                # o3d.visualization.draw_geometries([pcd1, pcd3], point_show_normal=True)
+        # TODO: set from rosparam:
+        mesh_num_samples = 500
+        representation = 'q' # choices=['so3', 'se3', 'q'], help='q for [q, t], so3 for [so3_log(R), t] or se3 for se3_log([R, t])'
+        objects_path = os.path.join(config.PATH_DATASET_TRACEBOT, 'objects')
+        # self.mask_path = os.path.join(config.PATH_DATASET_TRACEBOT, 'scenes')
+        self.scale = self.camera_info.width // 640
+        self.intrinsics = np.array(self.camera_info.K).reshape(3,3)
+        self.intrinsics[:2, :] //= self.scale
 
 
-                insides = torch.einsum('okij,okij->oki', surface_normals, gradients) > 0  # same direction -> inside  #dot-product
-                # filter by quorum of votes
-                inside = torch.sum(insides, dim=1) > k * 0.8 # shape (num_others, N)
+        self.lr = 0.015 #,
+        #     0.02,
+        #    0.04,
+        #    0.06,
+        # ]
 
-                # get nearest neighbor (in each other object)
-                distance, gradient, surface_normal = distances[:, 0, ...], gradients[:, 0, ...], surface_normals[:, 0,
-                                                                                                 ...]
+        self.loss_num = 1
+        # loss_number_list = [
+        #     # 0,
+        #     # 1,
+        #     # 2,
+        #     # 3,
+        #     # 4,
+        #     # 5,
+        #     6,
+        # ]
+        self.optimizer_name = 'adam'
+        self.optimizer_type = {
+            'adam': torch.optim.Adam,
+            #'adagrad': torch.optim.Adagrad,
+            #'RMSprop': torch.optim.RMSprop,
+            #'SGD': torch.optim.SGD,
+            #'LBFGS': torch.optim.LBFGS
+        }[self.optimizer_name]
+        self.max_num_iterations = 200
+        self.early_stopping_loss = 0.5 #350 #TODO adapt to scene automatically
 
-                # change sign of distance for points inside
-                distance[inside] *= -1
+        # load all meshes that will be needed
+        self.cmap = plt.cm.tab20(range(20)) # 20 different colors, two consecutive ones are similar (for two instances)
+        self.meshes, self.sampled_down_meshes = object_pose.load_objects_models(
+            SUPPORTED_OBJECTS, objects_path,
+            cmap=self.cmap, mesh_num_samples=mesh_num_samples)
 
-                # take minimum over other points --> minimal SDF overall
-                # = the closest outside/farthest inside each point is wrt any environment collider
-                if num_other == 1:
-                    batch_signed_distances.append(distance[0][None, ...])
-                else:
-                    distance, closest = distance.min(dim=0)
-                    batch_signed_distances.append(distance[None, ...])
-
-            signed_distances = torch.cat(batch_signed_distances, dim=0)
-
-            signed_distance, closest = torch.cat([signed_distance[:, None], signed_distances[:, None]], dim=1).min(
-                dim=1)  # the min distance, to which object we have the most collision ? that gives us the answer
-
-
-        # === 4) derive critical points - allows to determine feasibility and stability
-        contacts, intersects = signed_distance.abs() < TOL_CONTACT, signed_distance < -TOL_CONTACT
-        # critical_points = torch.cat([contacts[..., None], intersects[..., None], supported[..., None]], dim=-1)
-
-        return signed_distance, intersects
-
-
-    def forward(self, ref_rgb_tensor, image_name_debug, debug_flag, isbop):
-        # render the silhouette using the estimated pose
-        R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
-
-        binary = True
-        # binary = False
-        as_scene = True
-        contour_loss = None
-
-        if as_scene:  # 1 image
-            meshes_transformed = []
-            for mesh, mesh_r, mesh_t in zip(self.meshes, R.transpose(-2, -1), t):
-                new_verts_padded = \
-                    ((mesh_r @ mesh.verts_padded()[..., None]) + mesh_t[..., None])[..., 0]
-                mesh = mesh.update_padded(new_verts_padded)
-                meshes_transformed.append(mesh)
-            scene_transformed = join_meshes_as_scene(meshes_transformed)
-            image_est, fragments_est = self.ren_opt(meshes_world=scene_transformed,
-                                                    R=torch.eye(3)[None, ...].to(device),
-                                                    T=torch.zeros((1, 3)).to(device))
-            # Fragments have : pix_to_face, zbuf, bary_coords, dists
-
-            zbuf = fragments_est.zbuf # (N, h, w, k ) where N in as_scene = 1
-            zbuf[zbuf < 0] = torch.inf
-            image_depth_est = zbuf.min(dim=-1)[0]
-            image_depth_est[torch.isinf(image_depth_est)] = 0
-
-        # else:  # N images
-        #     scene = join_meshes_as_batch(self.meshes)
-        #     image_est, fragments_est = self.ren_opt(meshes_world=scene.clone(), R=R[:, 0], T=t[:, 0])
-        #     image_est = torch.clip(image_est.sum(dim=0)[None, ...], 0, 1)  # combine simple
-
-        # Calculating the signed distance
-        signed_dis, intersect_point = self.signed_dis(isbop=isbop)
-
-        # import pdb; pdb.set_trace()
-        # silhouette loss
-        rounded_ref = torch.round(self.image_ref.sum(-1), decimals=4)
-        vals = rounded_ref.unique()
-        print(vals)
-        rounded_image = torch.round(image_est[...,:3].sum(-1), decimals=4)
-
-        diff_rend_loss = torch.zeros(vals.shape[0] - 1)
-        for val_idx, val in enumerate(vals[1:]):
-            image_unique_mask = torch.where(
-                rounded_image == val, rounded_image / val, 0)
-            ref_unique_mask = torch.where(
-                rounded_ref == val, rounded_ref / val, 0)
-
-            diff_rend_loss[val_idx-1] = torch.sum((rounded_image - rounded_ref)**2)
-            # out_np = K.utils.tensor_to_image((image_unique_mask-ref_unique_mask)**2)
-            # # out_np = K.utils.tensor_to_image(torch.movedim((model.image_ref - image[..., :3])**2, 3, 1))
-            # plt.imshow(out_np); plt.savefig("/code/src/optim{:05d}-{}.png".format(i, val_idx))
-        # if binary:
-        #     d = (self.image_ref[..., 0] > 0).float() - image_est[..., 3]
-        # else:  # per instance
-        #     d = self.image_ref - image_est[..., :3]
-
-        # if debug_flag:
-        #     imsavePNG(image_est[:, :, :, 0], image_name_debug)
-
-        if self.loss_func_num == 0:
-            loss = torch.sum(torch.sum(d ** 2))
-        elif self.loss_func_num == 1:
-            # diff_rend_loss = torch.sum(torch.sum(d ** 2))
-            signed_dis_loss = torch.max(signed_dis)
-            # loss= torch.sum(torch.sum(d ** 2)) + torch.max(signed_dis) #torch.sum(intersect_point)
-            diff_rend_loss = torch.sum(diff_rend_loss)
-            loss= torch.sum(diff_rend_loss) + torch.max(signed_dis) #torch.sum(intersect_point)
-            # loss= diff_rend_loss + torch.max(signed_dis) #torch.sum(intersect_point)
-        # elif self.loss_func_num == 2:
-        #     loss = torch.sum(torch.sum(d ** 2)) + torch.sum(torch.clamp_min(-signed_dis, 0))
-        # elif self.loss_func_num == 3:
-        #     loss = torch.sum(torch.sum((d[d > 0]) ** 2)) / torch.sum(torch.sum(self.image_ref))
-        # elif self.loss_func_num == 4:
-        #     loss_difference = torch.sum(d[d > 0] ** 2)  # sum(squared difference within reference mask) -> 0.. if no difference, at most N[umber of pixels] in reference
-        #     loss_difference = loss_difference / torch.sum(self.image_ref)  # div by N -> [0,1]... 1 if complete outside
-        #     loss_outside = torch.sum(-d[-d > 0])  # number of pixels in estimated mask (that are not in reference mask) -> at most M (pixels in estimate)
-        #     loss_outside = loss_outside / torch.sum(image_est)  # div by M -> [0,1]... 1 if completely outside
-        #     loss = (loss_difference + loss_outside) * 100
-        # elif self.loss_func_num == 5:
-        #     loss_difference = torch.sum(d[d > 0] ** 2)  # sum(squared difference within reference mask) -> 0.. if no difference, at most N[umber of pixels] in reference
-        #     loss_difference = loss_difference / torch.sum(self.image_ref)  # div by N -> [0,1]... 1 if complete outside
-        #     loss_outside = torch.sum(-d[-d > 0])  # number of pixels in estimated mask (that are not in reference mask) -> at most M (pixels in estimate)
-        #     loss_outside = loss_outside / torch.sum(image_est)  # div by M -> [0,1]... 1 if completely outside
-        #     loss_sign = signed_dis.clip(-torch.inf, 0).mean() / signed_dis.min() #TODO: this is zero! Why ?! What should I do?
-        #     loss = (loss_difference + loss_outside + loss_sign) * 100
-        # elif self.loss_func_num == 6:
-        #     contour_diff = contour.contour_loss(
-        #         torch.sum(image_est, dim=-1),
-        #         # image_depth_est,
-        #         ref_rgb_tensor,
-        #         image_name_debug,
-        #         debug_flag
-        #     )
-        #     contour_loss = torch.sum(
-        #         contour_diff[contour_diff > 0])/(contour_diff.shape[-2] * contour_diff.shape[-1])
+        # Renderer
 
 
-        #     diff_rend_loss = torch.sum(torch.sum(d ** 2))
-        #     signed_dis_loss = torch.max(signed_dis)
+        # Optimization model
+        self.model = OptimizationModel(
+            None,
+            self.intrinsics,
+            self.camera_info.width // self.scale, self.camera_info.height // self.scale,
+            representation=representation,
+            image_scale=self.scale,
+            loss_function_num=self.loss_num).to(device)
 
-        #     # print(contour_loss, signed_dis_loss)
-        #     # loss = signed_dis_loss + contour_loss
+        # create server
+        self._server = SimpleActionServer(name, VerifyObjectAction, execute_cb=self.callback, auto_start=False)
+        self._server.start()
+        rospy.loginfo(f"[{name}] Action Server ready")
 
-        #     loss = diff_rend_loss + signed_dis_loss + contour_loss *  0.0001 # 0.00001
+    def create_masks_from_bounding_boxes(self, bounding_boxes, height, width):
+        masks = []
+        for bbox in bounding_boxes:
+            mask = np.zeros((height, width))
+            mask[bbox[1]:bbox[3], bbox[0]:bbox[2]] = 1
+            masks.append(mask.astype(bool))
 
+        return masks
+
+    def refine_masks_with_scene_depth(self, masks, depth):
+        return [
+            np.logical_and(mask.astype(bool), depth != 0)
+            for mask in masks
+        ]
+
+    def callback(self, goal):
+
+        # scene_objects = goal['object_types']
+        # rgb = goal['rgb']
+        # T_init_list = goal['poses']
+        # masks = goal['masks']
+
+        # Parse goal message ==================================================
+        scene_objects = [PROJECT_TO_INTERNAL_NAMES[scene_obj]
+            for scene_obj in goal.object_types]
+        rgb = ros_numpy.numpify(goal.color_image)
+        depth = ros_numpy.numpify(goal.depth_image)
+        init_poses = [ros_numpy.numpify(pose).astype(np.float32) for pose in goal.object_poses]
+        bounding_boxes = [
+            (bbox.x_offset, bbox.y_offset,
+             bbox.x_offset + bbox.width, bbox.y_offset + bbox.height)
+            for bbox in goal.bounding_boxes]
+        intrinsics = self.intrinsics
+
+        print("BEFORE FILTERING", scene_objects)
+        cv2.imwrite("/code/src/input_depth.png", depth)
+        cv2.imwrite("/code/src/input_color.png", rgb)
+
+        if self.scale != 1:
+            rgb = cv2.resize(rgb, (rgb.shape[1] // self.scale, rgb.shape[0] // self.scale))
+
+            bounding_boxes = [
+                [bbox[i] // self.scale for i in range(4)]
+                for bbox in bounding_boxes
+            ]
+
+            depth = cv2.resize(depth, (depth.shape[1] // self.scale, depth.shape[0] // self.scale)) # TODO: check size to see if scaling is necessary
+
+            # from skimage.transform import resize
+            # reference_width //= self.scale
+            # reference_height //= self.scale
+            # rgb = resize(rgb[..., :3], (reference_height, reference_width))
+            # reference_mask = resize(reference_mask, (reference_height, reference_width))
+
+        reference_height, reference_width = rgb.shape[:2]
+
+        t_mag = 1
+        scene_name = "ros_test_scene"
+        logger = Logger(log_dir=os.path.join(config.PATH_REPO, f"logs/{scene_name}/loss_num_{self.loss_num}/{self.optimizer_name}"),
+                                    log_name=f"{scene_name}_opt_{self.optimizer_name}_lr_{self.lr}",
+                                    reset_num_timesteps=True)
+
+        print("------- Scene number: ", scene_name)
+        # For each image in the scene
+
+        # prepare events
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        # record start
+        start.record()
+
+        im_id = 1 # range(1, number_of_scene_image+1)
+        # for im_id in range(1, number_of_scene_image+1): # range(1, number_of_scene_image+1)
+        # im_id = 37
+        print(f"im {im_id}: optimizing...")
+
+        # Depending on how many objects in the scene, sum all of them up together
+        # reference_mask = np.zeros((rgb.shape[0], rgb.shape[1]), dtype=np.float32)
+        # for num_obj, obj_mask in enumerate(masks):
+        #     # TODO make sure that mask for num_obj corresponds to pose in T_gt_list and the ith model in the scene
+        #     reference_mask[obj_mask > 0] = num_obj+1
+
+
+        # Extract plane =======================================================
+        if self.plane_model is None:
+            plane_det = PlaneDetector(
+                reference_width, reference_height,
+                to_meters=1e-3,
+                distance_threshold=0.01)
+            T, plane, scene, cloud, indices = plane_det.detect(
+                rgb, depth, intrinsics, max_dist=1.0)
+
+            # Create the filtered scene depth image
+            scene_pts = np.asarray(scene.points)
+            us = scene_pts[:, 0] / scene_pts[:, 2] * intrinsics[0, 0] + intrinsics[0, 2]
+            vs = scene_pts[:, 1] / scene_pts[:, 2] * intrinsics[1, 1] + intrinsics[1, 2]
+
+            scene_depth = np.zeros((reference_height, reference_width))
+            us, vs = us.astype(int), vs.astype(int)
+            scene_depth[vs, us] = scene_pts[:, 2]
+
+        # Filter detection based on depth =====================================
+        perc_valid_depth_per_det = []
+        det_mean_dist = []
+        for bbox in bounding_boxes:
+            bbox_depth = scene_depth[bbox[1]:bbox[3], bbox[0]:bbox[2]]
+            print("Bboxes & depth", bbox, bbox_depth)
+            perc_valid_depth_per_det.append(
+                np.mean(bbox_depth != 0))
+            det_mean_dist.append(np.mean(bbox_depth))
+
+        valid_det_mask = np.array(perc_valid_depth_per_det) > 0.1
+
+        print("valid_det_mask", valid_det_mask)
+
+        scene_objects = list(np.array(scene_objects)[valid_det_mask])
+        init_poses = list(np.array(init_poses)[valid_det_mask])
+        bounding_boxes = list(np.array(bounding_boxes)[valid_det_mask])
+
+        self.publish_viz(rgb, scene_objects, bounding_boxes, init_poses, [0.5 for _ in scene_objects], intrinsics)
+
+        #TODO order detections
+        #TODO filter supported objects?
+        #TODO filter out detections where the silhouette doesn't overlap with the detection
+        print("AFTER FILTERING", scene_objects)
+
+        # Prepare target silhouettes ==========================================
+        masks = self.create_masks_from_bounding_boxes(bounding_boxes, reference_height, reference_width)
+
+        # Create colored instance mask
+        reference_mask = np.zeros((reference_height, reference_width, 3))
+        for mask_idx, mask in enumerate(masks):
+            reference_mask[mask] = self.cmap[mask_idx, :3]
+
+
+        plt.imshow(reference_mask); plt.savefig("/code/src/ref_mask.png")
+        plt.imshow(scene_depth); plt.savefig("/code/src/ref_depth.png")
+
+        # Set up optimization =================================================
+        # create scene geometry from known meshes
+        object_names, object_counts = np.unique(scene_objects, return_counts=True)
+
+        assert object_counts.max() <= 3  # only 2 instances atm
+        counter = dict(zip(object_names, [0]*len(object_names)))
+        scene_meshes = []
+        scene_sampled_mesh = []
+        scene_obj_names = [] # For storing the name of the objects
+        for object_name in scene_objects:
+            i = counter[object_name]
+            counter[object_name] += 1
+            mesh = self.meshes[f'{object_name}-{i}']
+            scene_meshes.append(mesh)
+            scene_sampled_mesh.append(self.sampled_down_meshes[f'{object_name}-{i}'])
+            scene_obj_names.append(object_name)
+
+        # Adding the properties to the model
+        self.model.meshes = scene_meshes
+        self.model.sampled_meshes = scene_sampled_mesh
+        self.model.meshes_name = scene_obj_names
+
+        self.model.plane_T_matrix = torch.from_numpy(T).type(torch.FloatTensor).to(device)
+        self.model.plane_pcd = plane
+
+        # If the loss num = 6, calculate the 2D SDF
+        if self.model.loss_func_num == 6:
+            # Calculating the sdf image for the contour based loss
+            sdf_image = compute_sdf_image(rgb, reference_mask)
         else:
-            raise ValueError()
+            sdf_image = None
 
-        return loss, image_est, None, diff_rend_loss, signed_dis_loss, contour_loss # signed_dis
+        T_init_list = [torch.from_numpy(pose[None, ...]).to(device)
+                     for pose in init_poses]
 
-    def evaluate_progress(self, T_igt_list, isbop): # TODO: for checking
-        # note: we use the [[R, t], [0, 1]] convention here -> transpose all matrices
-        T_est_list = [T.transpose(-2, -1) for T in self.get_transform()]
-        T_res_list = [T_igt_list[i].transpose(-2, -1) @ T_est_list[i] for i in range(len(T_igt_list))]  # T_est @ T_igt
+        # Perform optimization ================================================
+        best_metrics, iter_values = object_pose.optimization_step(
+            self.model, rgb, scene_depth, reference_mask, T_init_list, None, sdf_image,
+            self.optimizer_type, self.max_num_iterations, self.early_stopping_loss, self.lr,
+            logger, im_id, debug_flag, f"debug/{scene_name}/loss_num_{self.loss_num}/{self.optimizer_name}/{self.lr}",
+            isbop=False)
 
-        # metrics_list = []
-        # metrics_str_list = []
-        metrics_dict = {
-            'R_iso': [],  # [deg] error between GT and estimated rotation
-            't_iso': [],  # [mm] error between GT and estimated translation
-            'ADD_abs': [],  # [mm] average distance between model points
-            'ADI_abs': [],  # -//- nearest model points
-            'ADD': [],  # [%] of model diameter
-            'ADI': [],  # -//- nearest model points
-        }
+        best_R_list, best_t_list = self.model.get_R_t()
 
-        for i in range(len(self.meshes)):
-            T_res = T_res_list[i]
+        end.record()
+        torch.cuda.synchronize()
+        # get time between events (in ms)
+        print("____Timing for the whole scene:______", start.elapsed_time(end))
 
-            # isometric errors
-            R_trace = T_res[:, 0, 0] + T_res[:, 1, 1] + T_res[:, 2, 2]  # note: torch.trace only supports 2D matrices
-            R_iso = torch.rad2deg(torch.arccos(torch.clamp(0.5 * (R_trace - 1), min=-1.0, max=1.0)))
-            metrics_dict["R_iso"].append(float(R_iso))
-            t_iso = torch.norm(T_res[:, :3, 3])
-            metrics_dict["t_iso"].append(float(t_iso))
-            # ADD/ADI error #TODO : number of samples for each object in the scene. if not equal => wrong
+        logger.close()
 
-            if isbop:
-                diameters = self.meshes_diameter[i]
-                mesh_pytorch = self.meshes[i]
-                # create from numpy arrays
-                d_mesh = open3d.geometry.TriangleMesh(
-                    vertices=open3d.utility.Vector3dVector(
-                        mesh_pytorch.verts_list()[0].cpu().detach().numpy().copy()),
-                    triangles=open3d.utility.Vector3iVector(
-                        mesh_pytorch.faces_list()[0].cpu().detach().numpy().copy()))
-                simple = d_mesh.simplify_quadric_decimation(
-                    int(9000))
-                mesh = torch.from_numpy(np.asarray(simple.vertices))[None, ...].type(torch.FloatTensor).to(device)
-            else:
-                mesh = self.meshes[i].verts_list()[0][None, ...]
-                diameters = torch.sqrt(square_distance(mesh, mesh).max(dim=-1)[0]).max(dim=-1)[0]
+        result = VerifyObjectResult()
+        for best_R, best_t in zip(best_R_list, best_t_list):
+            pose = np.eye(4)
+            pose[:3, :3] = best_R.to('cpu').detach().numpy()[0].T
+            pose[:3, 3] = best_t.to('cpu').detach().numpy()[0]
+            result.object_poses.append(
+                ros_numpy.msgify(Pose, pose)
+            )
 
-            mesh_off = (T_res[:, :3, :3] @ mesh.transpose(-1, -2)).transpose(-1, -2) + T_res[:, :3, 3][:, None, :]
-            dist_add = torch.norm(mesh - mesh_off, p=2, dim=-1).mean(dim=-1)
-            dist_adi = torch.sqrt(square_distance(mesh, mesh_off)).min(dim=-1)[0].mean(dim=-1)
-            metrics_dict["ADD_abs"].append(float(dist_add) * 1000)
-            # TODO: fix here
-            metrics_dict["ADI_abs"].append(float(dist_adi) * 1000)
-            metrics_dict["ADD"].append(float(dist_add / diameters) * 100)
-            metrics_dict["ADI"].append(float(dist_adi / diameters) * 100)
-        # TODO: Is it ok to convert them to float? not being a tensor anymore
-        metrics = {
-            'R_iso': np.mean(np.asarray(metrics_dict["R_iso"])),  # [deg] error between GT and estimated rotation
-            't_iso': np.mean(np.asarray(metrics_dict["t_iso"])),  # [mm] error between GT and estimated translation
-            'ADD_abs': np.mean(np.asarray(metrics_dict["ADD_abs"])),  # [mm] average distance between model points
-            'ADI_abs': np.mean(np.asarray(metrics_dict["ADI_abs"])),  # -//- nearest model points
-            'ADD': np.mean(np.asarray(metrics_dict["ADD"])),  # [%] of model diameter
-            'ADI': np.mean(np.asarray(metrics_dict["ADI"])),  # -//- nearest model points
-        }
-        # TODO: Fix the metrics_str
-        metrics_str = f"R={metrics['R_iso']:0.1f}deg, t={metrics['t_iso']:0.1f}mm\n" \
-                      f"ADD={metrics['ADD_abs']:0.1f}mm ({metrics['ADD']:0.1f}%)\n" \
-                      f"ADI={metrics['ADI_abs']:0.1f}mm ({metrics['ADI']:0.1f}%)"
+        result.header = goal.header
+        # result.bounding_boxes = bounding_boxes
+        # for mask in obj_masks: #TODO obtain updated masks from renderer
+        #     us, vs = np.nonzero(mask)
+        #     bbox = RegionOfInterest()
+        #     bbox.x_offset = vs.min()
+        #     bbox.y_offset = us.min()
+        #     bbox.width = vs.max() - vs.min()
+        #     bbox.height = us.max() - us.min()
+        #     result.bounding_boxes.append(bbox)
+        for box in bounding_boxes:
+            bbox = RegionOfInterest()
+            bbox.x_offset = box[0]
+            bbox.y_offset = box[1]
+            bbox.width = box[2] - box[0]
+            bbox.height = box[3] - box[1]
+            goal.bounding_boxes.append(bbox)
+        result.object_types = scene_objects
+        result.confidences = [1. for _ in scene_objects]
 
-        return metrics, metrics_str
+        self._server.set_succeeded(result)
 
-    def visualize_progress(self, background, text=""):
-        # estimate
-        R, t = self.get_R_t()
-        image_est = self.ren_vis(meshes_world=self.meshes, R=R, T=t)
-        estimate = image_est[0, ..., -1].detach().cpu().numpy()  # [0, 1]
-        silhouette = estimate > 0
+    def publish_viz(self, rgb, obj_names, bboxes, poses, scores, intrinsics):
+        viz_img = rgb.copy()
 
-        # visualization
-        vis = background[..., :3].copy()
-        # add estimated silhouette
-        vis *= 0.5
-        vis[..., 2] += estimate * 0.5
-        # # add estimated contour
-        # contour, _ = cv.findContours(np.uint8(silhouette[..., -1] > 0), cv.RETR_CCOMP, cv.CHAIN_APPROX_TC89_L1)
-        # vis = cv.drawContours(vis, contour, -1, (0, 0, 255), 1, lineType=cv.LINE_AA)
-        if text != "":
-            # add text
-            rect = cv.rectangle((vis * 255).astype(np.uint8), (0, 0), (250, 100), (167, 168, 168), -1)
-            vis = ((vis * 0.5 + rect/255 * 0.5) * 255).astype(np.uint8)
-            font_scale, font_color, font_thickness = 0.5, (0, 0, 0), 1
-            x0, y0 = 25, 25
-            for i, line in enumerate(text.split('\n')):
-                y = int(y0 + i * cv.getTextSize(line, cv.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0][1] * 1.5)
-                vis = cv.putText(vis, line, (x0, y),
-                                 cv.FONT_HERSHEY_SIMPLEX, font_scale, font_color, font_thickness, cv.LINE_AA)
-        return vis
+        for bbox in bboxes:
+            cv2.rectangle(viz_img,
+                        (int(bbox[0]), int(bbox[1])),
+                        (int(bbox[2]), int(bbox[3])), (0, 255, 0), 2)
+
+        for o_idx, obj_pose in enumerate(poses):
+            rospy.loginfo("{}: {}".format(obj_names[o_idx], scores[o_idx]))
+            rospy.loginfo("{}".format(obj_pose))
+            rvec, _ = cv2.Rodrigues(obj_pose[:3, :3])
+            cv2.drawFrameAxes(viz_img,
+                              intrinsics,
+                              np.zeros(5),
+                              rvec, obj_pose[:3, 3], 0.08)
 
 
-def square_distance(pcd1, pcd2):
-    # via https://discuss.pytorch.org/t/fastest-way-to-find-nearest-neighbor-for-a-set-of-points/5938/13
-    r_xyz1 = torch.sum(pcd1 * pcd1, dim=2, keepdim=True)  # (B,N,1)
-    r_xyz2 = torch.sum(pcd2 * pcd2, dim=2, keepdim=True)  # (B,M,1)
-    mul = torch.matmul(pcd1, pcd2.permute(0, 2, 1))  # (B,M,N)
-    return r_xyz1 - 2 * mul + r_xyz2.permute(0, 2, 1)
+        data = ros_numpy.msgify(Image, viz_img, encoding='8UC3')
+        data.header.frame_id = self.camera_info.header.frame_id
+        data.header.stamp = self.camera_info.header.stamp
+        self.viz_pub.publish(data)
 
+
+if __name__ == "__main__":
+    print("Ready!")
+    debug_flag = False
+
+    # parser = argparse.ArgumentParser(description='Tracebot project -- Pose estimation using differentiable rendering')
+    # parser.add_argument('--mask_path', type=str, default=os.path.join(config.PATH_DATASET_TRACEBOT, 'scenes'), help='Path to the ground truth mask')
+    # parser.add_argument('--debugging', type=bool, default=True, help='Using the debugging tool')
+    # args = parser.parse_args()
+
+    # --------------- Parameter
+    # cudnn_deterministic = True
+    # cudnn_benchmark = False
+    # debug_flag = args.debugging
+    # # mesh_num_samples = args.mesh_num_samples
+    # isbop = False
+
+    ################# TO KEEP
+
+    rospy.init_node('verify_object')
+    node = VerifyPose(rospy.get_name())
+    rospy.spin()

@@ -25,10 +25,10 @@ import open3d as o3d
 from src.contour import contour
 
 import matplotlib.pyplot as plt
-
+import kornia as K
 
 class OptimizationModel(nn.Module):
-    def __init__(self, meshes, intrinsics_dict, representation='q', image_scale=1, loss_function_num=1, BOP=False):
+    def __init__(self, meshes, intrinsics, width, height, representation='q', image_scale=1, loss_function_num=1, BOP=False):
         super().__init__()
         self.meshes = meshes
         self.meshes_name = None
@@ -45,30 +45,34 @@ class OptimizationModel(nn.Module):
 
         # Camera intrinsic
         cam = o3d.camera.PinholeCameraIntrinsic()
+        cam.intrinsic_matrix = intrinsics.tolist()
+        cam.height = height
+        cam.width = width
+        self.camera_ins = cam
 
-        if BOP :
-            cam.intrinsic_matrix = (np.reshape(np.asarray(intrinsics_dict), (3, 3))).tolist()
-            cam.height = 540
-            cam.width = 720
-            self.camera_ins = cam
-            # Scale
-            # - speed-up rendering
-            # - need to adapt intrinsics accordingly
-            width, height = 720 // image_scale, 540 // image_scale
-            intrinsics = np.asarray(intrinsics_dict).reshape(3, 3)
-            intrinsics[:2, :] //= image_scale
+        # if BOP :
+        #     cam.intrinsic_matrix = (np.reshape(np.asarray(intrinsics_dict), (3, 3))).tolist()
+        #     cam.height = 540
+        #     cam.width = 720
+        #     self.camera_ins = cam
+        #     # Scale
+        #     # - speed-up rendering
+        #     # - need to adapt intrinsics accordingly
+        #     width, height = 720 // image_scale, 540 // image_scale
+        #     intrinsics = np.asarray(intrinsics_dict).reshape(3, 3)
+        #     intrinsics[:2, :] //= image_scale
 
-        else:
-            cam.intrinsic_matrix = (np.reshape(np.asarray(intrinsics_dict["camera_matrix"]), (3, 3))).tolist()
-            cam.height = intrinsics_dict["image_height"]
-            cam.width = intrinsics_dict["image_width"]
-            self.camera_ins = cam
-            # Scale
-            # - speed-up rendering
-            # - need to adapt intrinsics accordingly
-            width, height = intrinsics_dict['image_width'] // image_scale, intrinsics_dict['image_height'] // image_scale
-            intrinsics = np.asarray(intrinsics_dict['camera_matrix']).reshape(3, 3)
-            intrinsics[:2, :] //= image_scale
+        # else:
+        #     cam.intrinsic_matrix = (np.reshape(np.asarray(intrinsics_dict["camera_matrix"]), (3, 3))).tolist()
+        #     cam.height = intrinsics_dict["image_height"]
+        #     cam.width = intrinsics_dict["image_width"]
+        #     self.camera_ins = cam
+        #     # Scale
+        #     # - speed-up rendering
+        #     # - need to adapt intrinsics accordingly
+        #     width, height = intrinsics_dict['image_width'] // image_scale, intrinsics_dict['image_height'] // image_scale
+        #     intrinsics = np.asarray(intrinsics_dict['camera_matrix']).reshape(3, 3)
+        #     intrinsics[:2, :] //= image_scale
 
         # Camera
         # - "assume that +X points left, and +Y points up and +Z points out from the image plane"
@@ -90,7 +94,7 @@ class OptimizationModel(nn.Module):
         # - [faces_per_pixel] faces are blended
         # - [sigma, gamma] controls opacity and sharpness of edges
         # - If [bin_size] and [max_faces_per_bin] are None (=default), coarse-to-fine rasterization is used.
-        blend_params = BlendParams(sigma=1e-5, gamma=1e-5, background_color=(0.0, 0.0, 0.0))  # TODO vary this, faces_per_pixel etc. to find good value
+        blend_params = BlendParams(sigma=1e-4, gamma=1e-4, background_color=(0.0, 0.0, 0.0))  # TODO vary this, faces_per_pixel etc. to find good value
         soft_raster_settings = RasterizationSettings(
             image_size=(height, width),
             blur_radius=np.log(1. / 1e-4 - 1.) * blend_params.sigma,
@@ -312,12 +316,11 @@ class OptimizationModel(nn.Module):
         return signed_distance, intersects
 
 
-    def forward(self, ref_rgb_tensor, image_name_debug, debug_flag, isbop):
+    def forward(self, ref_rgb_tensor, ref_depth, image_name_debug, debug_flag, isbop):
         # render the silhouette using the estimated pose
         R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
 
         binary = True
-        # binary = False
         as_scene = True
         contour_loss = None
 
@@ -333,11 +336,18 @@ class OptimizationModel(nn.Module):
                                                     R=torch.eye(3)[None, ...].to(device),
                                                     T=torch.zeros((1, 3)).to(device))
             # Fragments have : pix_to_face, zbuf, bary_coords, dists
+            # import pdb; pdb.set_trace()
 
             zbuf = fragments_est.zbuf # (N, h, w, k ) where N in as_scene = 1
-            zbuf[zbuf < 0] = torch.inf
-            image_depth_est = zbuf.min(dim=-1)[0]
-            image_depth_est[torch.isinf(image_depth_est)] = 0
+            MAX_DEPTH = 5
+            image_depth_est = torch.where(zbuf >= 0, zbuf, MAX_DEPTH)
+            image_depth_est, depth_indices = image_depth_est.min(-1)
+            image_depth_est = torch.where(
+                image_depth_est != MAX_DEPTH, image_depth_est, 0.)
+
+            # zbuf[zbuf < 0] = torch.inf
+            # image_depth_est = zbuf.min(dim=-1)[0]
+            # image_depth_est[torch.isinf(image_depth_est)] = 0
 
         # else:  # N images
         #     scene = join_meshes_as_batch(self.meshes)
@@ -347,28 +357,59 @@ class OptimizationModel(nn.Module):
         # Calculating the signed distance
         signed_dis, intersect_point = self.signed_dis(isbop=isbop)
 
-        # import pdb; pdb.set_trace()
+
         # silhouette loss
-        rounded_ref = torch.round(self.image_ref.sum(-1), decimals=4)
+        rounded_image = torch.round(image_est[..., 0], decimals=3)
+        rounded_ref = torch.round(self.image_ref[..., 0], decimals=3)
         vals = rounded_ref.unique()
-        print(vals)
-        rounded_image = torch.round(image_est[...,:3].sum(-1), decimals=4)
+        # print(vals)
 
         diff_rend_loss = torch.zeros(vals.shape[0] - 1)
         for val_idx, val in enumerate(vals[1:]):
             image_unique_mask = torch.where(
-                rounded_image == val, rounded_image / val, 0)
-            ref_unique_mask = torch.where(
-                rounded_ref == val, rounded_ref / val, 0)
+                rounded_image == val, image_est[..., 3], 0)
+            ref_unique_mask = torch.where(rounded_ref == val, 1., 0.)
 
-            diff_rend_loss[val_idx-1] = torch.sum((rounded_image - rounded_ref)**2)
-            # out_np = K.utils.tensor_to_image((image_unique_mask-ref_unique_mask)**2)
-            # # out_np = K.utils.tensor_to_image(torch.movedim((model.image_ref - image[..., :3])**2, 3, 1))
-            # plt.imshow(out_np); plt.savefig("/code/src/optim{:05d}-{}.png".format(i, val_idx))
-        # if binary:
-        #     d = (self.image_ref[..., 0] > 0).float() - image_est[..., 3]
-        # else:  # per instance
-        #     d = self.image_ref - image_est[..., :3]
+            union = ((image_unique_mask + ref_unique_mask) > 0).float()
+
+            diff_rend_loss[val_idx] = torch.sum(
+                (image_unique_mask - ref_unique_mask)**2
+            ) / torch.sum(union) # Corresponds to 1 - IoU
+            # diff_rend_loss[val_idx] = torch.sum(
+            #     (ref_unique_mask*(self.image_ref[..., 0] > 0).float()
+            #       - image_unique_mask*image_est[..., :3].sum(-1)/val)**2)
+
+            out_np = K.utils.tensor_to_image((image_unique_mask - ref_unique_mask)**2)
+            # out_np = K.utils.tensor_to_image(torch.movedim((model.image_ref - image[..., :3])**2, 3, 1))
+            plt.imshow(out_np); plt.savefig("/code/src/mask-{}.png".format(val_idx))
+
+
+        ref_depth_tensor = torch.from_numpy(
+            ref_depth.astype(np.float32)).to(device)
+        # ref_depth_tensor *= (self.image_ref[..., 0] > 0).float()
+        # d_depth = (ref_depth_tensor - image_depth_est)
+
+        depth = torch.gather(zbuf, 0, depth_indices[..., None])
+        d_depth = (depth - ref_depth_tensor[None, ..., None])[depth > 0]
+
+        # depth_loss = torch.sum(d_depth**2) / torch.sum((zbuf > -1).float())
+        depth_loss = torch.sum(d_depth**2) / (d_depth.shape[0])
+        # depth_loss = 0
+        # print("Depth", image_depth_est.min(), image_depth_est.max(), ref_depth_tensor.min(), ref_depth_tensor.max())
+
+        out_np = K.utils.tensor_to_image(image_depth_est)
+        plt.imshow(out_np); plt.savefig("/code/src/depth_est.png")
+        # out_np = K.utils.tensor_to_image(d_depth**2)
+        # plt.imshow(out_np); plt.savefig("/code/src/depth.png")
+
+        if binary:
+            d = (self.image_ref[..., 0] > 0).float() - image_est[..., 3]
+            d = d / torch.sum((self.image_ref[..., 0] > 0).float())
+            # loss = torch.nn.BCELoss()
+            # d = loss((self.image_ref[..., 0] > 0).float().view((-1, 1)), image_est[..., 3].view((-1, 1)))
+
+        else:  # per instance
+            d = self.image_ref - image_est[..., :3]
 
         # if debug_flag:
         #     imsavePNG(image_est[:, :, :, 0], image_name_debug)
@@ -376,11 +417,12 @@ class OptimizationModel(nn.Module):
         if self.loss_func_num == 0:
             loss = torch.sum(torch.sum(d ** 2))
         elif self.loss_func_num == 1:
-            # diff_rend_loss = torch.sum(torch.sum(d ** 2))
             signed_dis_loss = torch.max(signed_dis)
+            # diff_rend_loss = torch.sum(torch.sum(d ** 2))
             # loss= torch.sum(torch.sum(d ** 2)) + torch.max(signed_dis) #torch.sum(intersect_point)
             diff_rend_loss = torch.sum(diff_rend_loss)
             loss= torch.sum(diff_rend_loss) + torch.max(signed_dis) #torch.sum(intersect_point)
+            # loss= 10*torch.sum(depth_loss) #torch.sum(intersect_point)
             # loss= diff_rend_loss + torch.max(signed_dis) #torch.sum(intersect_point)
         # elif self.loss_func_num == 2:
         #     loss = torch.sum(torch.sum(d ** 2)) + torch.sum(torch.clamp_min(-signed_dis, 0))
@@ -422,7 +464,7 @@ class OptimizationModel(nn.Module):
         else:
             raise ValueError()
 
-        return loss, image_est, None, diff_rend_loss, signed_dis_loss, contour_loss # signed_dis
+        return loss, image_est, None, diff_rend_loss, signed_dis_loss, contour_loss, depth_loss # signed_dis
 
     def evaluate_progress(self, T_igt_list, isbop): # TODO: for checking
         # note: we use the [[R, t], [0, 1]] convention here -> transpose all matrices

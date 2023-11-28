@@ -6,11 +6,10 @@ import open3d as o3d
 
 class PlaneDetector:
 
-    def __init__(self, width, height, intrinsics, to_meters=1e-3, distance_threshold=0.005):
+    def __init__(self, width, height, to_meters=1e-3, distance_threshold=0.005):
         self.width, self.height = int(width), int(height)
         self.vmap, self.umap = np.meshgrid(range(self.width), range(self.height))
 
-        self.intrinsics = intrinsics
         self.to_meters = to_meters
         self.distance_threshold = distance_threshold
 
