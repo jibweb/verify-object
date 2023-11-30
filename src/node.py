@@ -45,23 +45,24 @@ PROJECT_TO_INTERNAL_NAMES = {
 
 class VerifyPose:
 
-    def __init__(self, name):
+    def __init__(self, name, debug_flag=False, intrinsics_from_file=False):
+
+        self.debug_flag = debug_flag
 
         # Reading camera intrinsics
-        intrinsics_from_topic = False
-        if intrinsics_from_topic:
-            self.camera_info_topic = rospy.get_param('/locateobject/camera_info_topic',
-                                                    '/camera/color/camera_info')
-            rospy.loginfo(f"[{name}] Waiting for camera info ...")
-            self.camera_info = rospy.wait_for_message(self.camera_info_topic, CameraInfo)
-            rospy.loginfo(f"[{name}] Camera info received")
-        else:
+        if intrinsics_from_file:
             camera_intr_path = os.path.join(config.PATH_DATASET_TRACEBOT, 'camera_d435.yaml')
             intrinsics_yaml = yaml.load(open(camera_intr_path, 'r'), Loader=yaml.FullLoader)
             self.camera_info = CameraInfo()
             self.camera_info.K = intrinsics_yaml['camera_matrix']
             self.camera_info.height = intrinsics_yaml["image_height"]
             self.camera_info.width = intrinsics_yaml["image_width"]
+        else:
+            self.camera_info_topic = rospy.get_param('/locateobject/camera_info_topic',
+                                                    '/camera/color/camera_info')
+            rospy.loginfo(f"[{name}] Waiting for camera info ...")
+            self.camera_info = rospy.wait_for_message(self.camera_info_topic, CameraInfo)
+            rospy.loginfo(f"[{name}] Camera info received")
 
 
         self.viz_pub = rospy.Publisher(f"/{name}/debug_visualization", Image, queue_size=10, latch=True)
@@ -146,15 +147,10 @@ class VerifyPose:
 
     def callback(self, goal):
 
-        # scene_objects = goal['object_types']
-        # rgb = goal['rgb']
-        # T_init_list = goal['poses']
-        # masks = goal['masks']
-
         # Parse goal message ==================================================
         scene_objects = [PROJECT_TO_INTERNAL_NAMES[scene_obj]
             for scene_obj in goal.object_types]
-        rgb = ros_numpy.numpify(goal.color_image)
+        rgb = ros_numpy.numpify(goal.color_image)[..., ::-1]
         depth = ros_numpy.numpify(goal.depth_image)
         init_poses = [ros_numpy.numpify(pose).astype(np.float32) for pose in goal.object_poses]
         bounding_boxes = [
@@ -163,7 +159,6 @@ class VerifyPose:
             for bbox in goal.bounding_boxes]
         intrinsics = self.intrinsics
 
-        print("BEFORE FILTERING", scene_objects)
         cv2.imwrite("/code/src/input_depth.png", depth)
         cv2.imwrite("/code/src/input_color.png", rgb)
 
@@ -235,7 +230,7 @@ class VerifyPose:
         det_mean_dist = []
         for bbox in bounding_boxes:
             bbox_depth = scene_depth[bbox[1]:bbox[3], bbox[0]:bbox[2]]
-            print("Bboxes & depth", bbox, bbox_depth)
+            # print("Bboxes & depth", bbox, bbox_depth)
             perc_valid_depth_per_det.append(
                 np.mean(bbox_depth != 0))
             det_mean_dist.append(np.mean(bbox_depth))
@@ -253,7 +248,6 @@ class VerifyPose:
         #TODO order detections
         #TODO filter supported objects?
         #TODO filter out detections where the silhouette doesn't overlap with the detection
-        print("AFTER FILTERING", scene_objects)
 
         # Prepare target silhouettes ==========================================
         masks = self.create_masks_from_bounding_boxes(bounding_boxes, reference_height, reference_width)
@@ -285,9 +279,12 @@ class VerifyPose:
             scene_obj_names.append(object_name)
 
         # Adding the properties to the model
-        self.model.meshes = scene_meshes
+        # self.model.meshes = scene_meshes
+        self.model.renderer.meshes = scene_meshes
         self.model.sampled_meshes = scene_sampled_mesh
-        self.model.meshes_name = scene_obj_names
+        self.model.renderer.sampled_meshes = scene_sampled_mesh
+        # self.model.meshes_name = scene_obj_names
+        self.model.renderer.meshes_name = scene_obj_names
 
         self.model.plane_T_matrix = torch.from_numpy(T).type(torch.FloatTensor).to(device)
         self.model.plane_pcd = plane
@@ -304,12 +301,21 @@ class VerifyPose:
 
         # Perform optimization ================================================
         best_metrics, iter_values = object_pose.optimization_step(
-            self.model, rgb, scene_depth, reference_mask, T_init_list, None, sdf_image,
+            self.model, rgb, scene_depth, masks, T_init_list, None, sdf_image,
             self.optimizer_type, self.max_num_iterations, self.early_stopping_loss, self.lr,
-            logger, im_id, debug_flag, f"debug/{scene_name}/loss_num_{self.loss_num}/{self.optimizer_name}/{self.lr}",
+            logger, im_id, self.debug_flag, f"debug/{scene_name}/loss_num_{self.loss_num}/{self.optimizer_name}/{self.lr}",
             isbop=False)
 
         best_R_list, best_t_list = self.model.get_R_t()
+        predicted_poses = []
+        for best_R, best_t in zip(best_R_list, best_t_list):
+            pose = np.eye(4)
+            pose[:3, :3] = best_R.to('cpu').detach().numpy()[0].T
+            pose[:3, 3] = best_t.to('cpu').detach().numpy()[0]
+            predicted_poses.append(pose)
+
+
+        self.publish_viz(rgb, scene_objects, bounding_boxes, predicted_poses, [0.5 for _ in scene_objects], intrinsics)
 
         end.record()
         torch.cuda.synchronize()
@@ -319,13 +325,9 @@ class VerifyPose:
         logger.close()
 
         result = VerifyObjectResult()
-        for best_R, best_t in zip(best_R_list, best_t_list):
-            pose = np.eye(4)
-            pose[:3, :3] = best_R.to('cpu').detach().numpy()[0].T
-            pose[:3, 3] = best_t.to('cpu').detach().numpy()[0]
-            result.object_poses.append(
-                ros_numpy.msgify(Pose, pose)
-            )
+        result.object_poses = [
+            ros_numpy.msgify(Pose, pose) for pose in predicted_poses
+        ]
 
         result.header = goal.header
         # result.bounding_boxes = bounding_boxes
@@ -360,6 +362,7 @@ class VerifyPose:
         for o_idx, obj_pose in enumerate(poses):
             rospy.loginfo("{}: {}".format(obj_names[o_idx], scores[o_idx]))
             rospy.loginfo("{}".format(obj_pose))
+
             rvec, _ = cv2.Rodrigues(obj_pose[:3, :3])
             cv2.drawFrameAxes(viz_img,
                               intrinsics,
@@ -374,23 +377,14 @@ class VerifyPose:
 
 
 if __name__ == "__main__":
-    print("Ready!")
-    debug_flag = False
-
-    # parser = argparse.ArgumentParser(description='Tracebot project -- Pose estimation using differentiable rendering')
-    # parser.add_argument('--mask_path', type=str, default=os.path.join(config.PATH_DATASET_TRACEBOT, 'scenes'), help='Path to the ground truth mask')
-    # parser.add_argument('--debugging', type=bool, default=True, help='Using the debugging tool')
-    # args = parser.parse_args()
-
-    # --------------- Parameter
-    # cudnn_deterministic = True
-    # cudnn_benchmark = False
-    # debug_flag = args.debugging
-    # # mesh_num_samples = args.mesh_num_samples
-    # isbop = False
-
-    ################# TO KEEP
+    parser = argparse.ArgumentParser(description='Tracebot project -- Pose refinement and verification using differentiable rendering')
+    parser.add_argument('--debug', dest='debug', default=False, action='store_true')
+    parser.add_argument('--intrinsics_from_file', dest='intrinsics_from_file', default=False, action='store_true')
+    args = parser.parse_args()
 
     rospy.init_node('verify_object')
-    node = VerifyPose(rospy.get_name())
+    node = VerifyPose(
+        rospy.get_name(),
+        debug_flag=args.debug,
+        intrinsics_from_file=args.intrinsics_from_file)
     rospy.spin()

@@ -224,7 +224,7 @@ def scene_optimization(logger, t_mag, isbop, scene_path, mask_path, scene_number
     return best_metrics, iter_values
 
 
-def optimization_step(model, reference_rgb, reference_depth, reference_mask, T_init_list, T_igt_list, ref_gray_tensor,
+def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_init_list, T_igt_list, ref_gray_tensor,
         optimizer_type, max_num_iterations, early_stopping_loss, lr,
         logger, im_id, debug_flag, img_debug_name,
         isbop):
@@ -233,7 +233,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_mask, T_i
 
     # Initializate model
     T_init_list_transposed = [T_init.transpose(-2, -1) for T_init in T_init_list]
-    model.init(reference_mask, T_init_list_transposed)  # note: pytorch3d uses [[R,0], [t, 1]] format (-> transposed)
+    model.init(None, T_init_list_transposed)  # note: pytorch3d uses [[R,0], [t, 1]] format (-> transposed)
 
     if T_igt_list:
         metrics, metrics_str = model.evaluate_progress(
@@ -269,6 +269,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_mask, T_i
         loss, image, signed_dis, diff_rend_loss, signed_dis_loss, contour_loss, depth_loss = model(
             ref_gray_tensor,
             reference_depth,
+            reference_masks,
             f"{img_debug_name}/{im_id}/{i}.png",
             debug_flag,
             isbop)  # Calling forward function
