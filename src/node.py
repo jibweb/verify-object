@@ -147,6 +147,7 @@ class VerifyPose:
 
     def callback(self, goal):
 
+        print(1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
         # Parse goal message ==================================================
         scene_objects = [PROJECT_TO_INTERNAL_NAMES[scene_obj]
             for scene_obj in goal.object_types]
@@ -282,7 +283,7 @@ class VerifyPose:
         # self.model.meshes = scene_meshes
         self.model.renderer.meshes = scene_meshes
         self.model.sampled_meshes = scene_sampled_mesh
-        self.model.renderer.sampled_meshes = scene_sampled_mesh
+        # self.model.renderer.sampled_meshes = scene_sampled_mesh
         # self.model.meshes_name = scene_obj_names
         self.model.renderer.meshes_name = scene_obj_names
 
@@ -298,6 +299,7 @@ class VerifyPose:
 
         T_init_list = [torch.from_numpy(pose[None, ...]).to(device)
                      for pose in init_poses]
+        print(2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         # Perform optimization ================================================
         best_metrics, iter_values = object_pose.optimization_step(
@@ -321,6 +323,8 @@ class VerifyPose:
         torch.cuda.synchronize()
         # get time between events (in ms)
         print("____Timing for the whole scene:______", start.elapsed_time(end))
+        # torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
+
 
         logger.close()
 
@@ -348,6 +352,8 @@ class VerifyPose:
             goal.bounding_boxes.append(bbox)
         result.object_types = scene_objects
         result.confidences = [1. for _ in scene_objects]
+
+        print("LAST", "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         self._server.set_succeeded(result)
 

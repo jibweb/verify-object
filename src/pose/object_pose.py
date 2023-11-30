@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 import torchvision
 import kornia as K
 
+from torch.profiler import profile, record_function, ProfilerActivity
 
 # --------- PREPARE OUR OWN DATA
 def tq_to_m(tq):
@@ -265,7 +266,11 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         #     print("starting from here ")
         # update
 
+        print("OPTIM_STEP", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
+
         optimizer.zero_grad()
+        # with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU], profile_memory=True, record_shapes=True) as prof:
+        # with profile(activities=[ProfilerActivity.CUDA], profile_memory=True, record_shapes=True) as prof:
         loss, image, signed_dis, diff_rend_loss, signed_dis_loss, contour_loss, depth_loss = model(
             ref_gray_tensor,
             reference_depth,
@@ -274,6 +279,8 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
             debug_flag,
             isbop)  # Calling forward function
         # print("loss : ", loss,  " image: ", torch.sum(image), diff_rend_loss, signed_dis_loss, contour_loss)
+        # print(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
+
         loss.backward()
         optimizer.step()
 
@@ -342,6 +349,8 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
     # record end and synchronize
     end.record()
     torch.cuda.synchronize()
+    print("OPTIM_STEP", 2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
+
     # get time between events (in ms)
     print("______timing_________: ", start.elapsed_time(end))
 

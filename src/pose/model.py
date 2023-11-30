@@ -52,154 +52,14 @@ class OptimizationModel(nn.Module):
         cam.width = width
         self.camera_ins = cam
 
-        # if BOP :
-        #     cam.intrinsic_matrix = (np.reshape(np.asarray(intrinsics_dict), (3, 3))).tolist()
-        #     cam.height = 540
-        #     cam.width = 720
-        #     self.camera_ins = cam
-        #     # Scale
-        #     # - speed-up rendering
-        #     # - need to adapt intrinsics accordingly
-        #     width, height = 720 // image_scale, 540 // image_scale
-        #     intrinsics = np.asarray(intrinsics_dict).reshape(3, 3)
-        #     intrinsics[:2, :] //= image_scale
-
-        # else:
-        #     cam.intrinsic_matrix = (np.reshape(np.asarray(intrinsics_dict["camera_matrix"]), (3, 3))).tolist()
-        #     cam.height = intrinsics_dict["image_height"]
-        #     cam.width = intrinsics_dict["image_width"]
-        #     self.camera_ins = cam
-        #     # Scale
-        #     # - speed-up rendering
-        #     # - need to adapt intrinsics accordingly
-        #     width, height = intrinsics_dict['image_width'] // image_scale, intrinsics_dict['image_height'] // image_scale
-        #     intrinsics = np.asarray(intrinsics_dict['camera_matrix']).reshape(3, 3)
-        #     intrinsics[:2, :] //= image_scale
-
-        # Camera
-        # - "assume that +X points left, and +Y points up and +Z points out from the image plane"
-        # - see https://github.com/facebookresearch/pytorch3d/blob/main/docs/notes/cameras.md
-        # - see https://github.com/facebookresearch/pytorch3d/blob/main/docs/notes/renderer_getting_started.md
-        # - this is different from, e.g., OpenCV -> inverting focal length achieves the coordinate flip (hacky solution)
-        # - see https://github.com/facebookresearch/pytorch3d/issues/522#issuecomment-762793832
-        # ren_intrinsics = intrinsics.copy()
-        # ren_intrinsics[0, 0] *= -1  # Based on the differentiation between the coordinate systems: negative focal length
-        # ren_intrinsics[1, 1] *= -1
-        # ren_intrinsics = ren_intrinsics.astype(np.float32)
-        # cameras = cameras_from_opencv_projection(R=torch.from_numpy(np.eye(4, dtype=np.float32)[None, ...]),
-        #                                          tvec=torch.from_numpy(np.asarray([[0, 0, 0]]).astype(np.float32)),
-        #                                          camera_matrix=torch.from_numpy(ren_intrinsics[:3, :3][None, ...]),
-        #                                          image_size=torch.from_numpy(
-        #                                              np.asarray([[height, width]]).astype(np.float32)))
-        # self.cameras = cameras.to(device)
-
-
+        # Set up renderer
         self.renderer = Renderer(meshes, intrinsics, width, height, representation=representation)
 
-        # # SoftRas-style rendering
-        # # - [faces_per_pixel] faces are blended
-        # # - [sigma, gamma] controls opacity and sharpness of edges
-        # # - If [bin_size] and [max_faces_per_bin] are None (=default), coarse-to-fine rasterization is used.
-        # blend_params = BlendParams(sigma=1e-4, gamma=1e-4, background_color=(0.0, 0.0, 0.0))  # TODO vary this, faces_per_pixel etc. to find good value
-        # soft_raster_settings = RasterizationSettings(
-        #     image_size=(height, width),
-        #     blur_radius=np.log(1. / 1e-4 - 1.) * blend_params.sigma,
-        #     faces_per_pixel=100,
-        #     perspective_correct=True, # TODO: Correct?
-        # )
-        # lights = PointLights(device=device, location=((0.0, 0.0, 0.0),), ambient_color=((1.0, 1.0, 1.0),),
-        #                      diffuse_color=((0.0, 0.0, 0.0),), specular_color=((0.0, 0.0, 0.0),),
-        #                      )  # at origin = camera center
-        # self.ren_opt = MeshRendererWithFragments(
-        #     rasterizer=MeshRasterizer(
-        #         cameras=self.cameras,
-        #         raster_settings=soft_raster_settings
-        #     ),
-        #     # shader=SoftSilhouetteShader(blend_params=blend_params)
-        #     shader=SoftGouraudShader(blend_params=blend_params, device=device, cameras=self.cameras, lights=lights)
-        # )
-
-        # # Simple Phong-shaded renderer
-        # # - faster for visualization
-        # hard_raster_settings = RasterizationSettings(
-        #     image_size=(height, width),
-        #     blur_radius=0.0,
-        #     faces_per_pixel=1,
-        # )
-        # self.ren_vis = MeshRenderer(
-        #     rasterizer=MeshRasterizer(
-        #         cameras=self.cameras,
-        #         raster_settings=hard_raster_settings
-        #     ),
-        #     shader=HardPhongShader(device=device, cameras=self.cameras, lights=lights)
-        # )
-
-        # # Placeholders for optimization parameters and the reference image
-        # # - rotation matrix must be orthogonal (i.e., element of SO(3)) - easier to use quaternion
-        # self.representation = representation
-        # if self.representation == 'se3':
-        #     self.log_list = None
-        # elif self.representation == 'so3':
-        #     self.r_list = None
-        #     self.t_list = None
-        # elif self.representation == 'q':
-        #     self.q_list = None
-        #     self.t_list = None
-        # elif self.representation == 'in-plane':
-        #     # TODO dummies
-        #     self.scale_rotation = 10  # bigger impact of rotation st it's not dominated by translation
         self.image_ref = None  # Image mask reference
 
     def init(self, image_ref, T_init_list, T_plane=None): # TODO : Did I do it correctly here?
         # self.image_ref = torch.from_numpy(image_ref.astype(np.float32)).to(device)
         self.renderer.init(T_init_list)
-
-        # if self.representation == 'se3':
-        #     self.log_list = nn.Parameter(torch.stack([(se3_log_map(T_init)) for T_init in T_init_list]))
-        # elif self.representation == 'so3':
-        #     self.r_list = nn.Parameter(torch.stack([(so3_log_map(T_init[:, :3, :3])) for T_init in T_init_list]))
-        #     self.t_list = nn.Parameter(torch.stack([(T_init[:, 3, :3]) for T_init in T_init_list]))
-        # elif self.representation == 'q':  # [q, t] representation
-        #     self.q_list = nn.Parameter(torch.stack([(matrix_to_quaternion(T_init[:, :3, :3])) for T_init in T_init_list]))
-        #     self.t_list = nn.Parameter(torch.stack([(T_init[:, 3, :3]) for T_init in T_init_list]))
-        # elif self.representation == 'in-plane': # TODO: Check for in-plane how should this change ?
-        #     # in this representation, we only update two delta values
-        #     # - rz = in-plane z rotation, txy = in-plane xy translation
-        #     # - they are applied on top of T_init in place space
-        #     assert T_plane is not None
-        #     self.T_plane, self.T_plane_inv = T_plane, T_plane.inverse()
-        #     self.T_init, self.T_init_inplane = T_init, T_init @ self.T_plane_inv
-        #     self.rz = nn.Parameter(torch.zeros((T_plane.shape[0]), dtype=torch.float32, device=device))
-        #     self.txy = nn.Parameter(torch.zeros((T_plane.shape[0], 2), dtype=torch.float32, device=device))
-
-
-    # def get_R_t(self): # TODO: Check other representations, does it work?? ** Use torch.stack
-    #     if self.representation == 'se3': #TODO: adapt this
-    #         self.log_list
-    #         T = se3_exp_map(self.log)
-    #         return T[:, :3, :3], T[:, 3, :3]
-    #     elif self.representation == 'so3': #TODO: adapt this
-    #         return so3_exp_map(self.r), self.t
-    #     elif self.representation == 'q': #TODO: Is this correct?
-    #         return torch.stack([quaternion_to_matrix(q) for q in self.q_list]), self.t_list
-    #     elif self.representation == 'in-plane': #TODO: adapt this, no idea how
-    #         eulers = matrix_to_euler_angles(self.T_init_inplane[:, :3, :3], "XYZ")
-    #         eulers[:, 2] += self.rz * self.scale_rotation
-    #         T = self.T_init_inplane.clone()
-    #         T[:, :3, :3] = euler_angles_to_matrix(eulers, "XYZ")
-    #         T[:, 3, :2] += self.txy
-    #         T = T @ self.T_plane
-    #         return T[:, :3, :3], T[:, 3, :3]
-
-    # def get_transform(self): # TODO: Is it correct?
-    #     T_list = []
-    #     r_list, t_list = self.get_R_t()
-    #     for i in range(len(r_list)):
-    #         T = torch.eye(4, device=device)[None, ...]
-    #         T[:, :3, :3] = r_list[i]
-    #         T[:, 3, :3] = t_list[i]
-    #         T_list.append(T)
-    #     return T_list
 
     def signed_dis(self, isbop=False,k=10):
         """
@@ -327,84 +187,33 @@ class OptimizationModel(nn.Module):
         return self.renderer.get_R_t()
 
     def forward(self, ref_rgb_tensor, ref_depth, ref_masks, image_name_debug, debug_flag, isbop):
-        # render the silhouette using the estimated pose
+        print("MODEL", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
+        # Render the silhouette using the estimated pose
         image_est, image_depth_est, obj_masks, fragments_est = self.renderer()
-        # R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
 
-        # binary = True
-        # as_scene = True
         contour_loss = None
-
-        # if as_scene:  # 1 image
-        #     meshes_transformed = []
-        #     meshes_faces_num = [0]
-        #     for mesh, mesh_r, mesh_t in zip(self.meshes, R.transpose(-2, -1), t):
-        #         new_verts_padded = \
-        #             ((mesh_r @ mesh.verts_padded()[..., None]) + mesh_t[..., None])[..., 0]
-        #         mesh = mesh.update_padded(new_verts_padded)
-        #         meshes_transformed.append(mesh)
-        #         meshes_faces_num.append(meshes_faces_num[-1] + mesh.faces_packed().shape[0])
-        #     scene_transformed = join_meshes_as_scene(meshes_transformed)
-        #     image_est, fragments_est = self.ren_opt(meshes_world=scene_transformed,
-        #                                             R=torch.eye(3)[None, ...].to(device),
-        #                                             T=torch.zeros((1, 3)).to(device))
-        #     # Fragments have : pix_to_face, zbuf, bary_coords, dists
-        #     # import pdb; pdb.set_trace()
-
-        #     zbuf = fragments_est.zbuf # (N, h, w, k ) where N in as_scene = 1
-        #     MAX_DEPTH = 5
-        #     image_depth_est = torch.where(zbuf >= 0, zbuf, MAX_DEPTH)
-        #     image_depth_est, depth_indices = image_depth_est.min(-1)
-        #     image_depth_est = torch.where(
-        #         image_depth_est != MAX_DEPTH, image_depth_est, 0.)
-
-            # zbuf[zbuf < 0] = torch.inf
-            # image_depth_est = zbuf.min(dim=-1)[0]
-            # image_depth_est[torch.isinf(image_depth_est)] = 0
-
-        # else:  # N images
-        #     scene = join_meshes_as_batch(self.meshes)
-        #     image_est, fragments_est = self.ren_opt(meshes_world=scene.clone(), R=R[:, 0], T=t[:, 0])
-        #     image_est = torch.clip(image_est.sum(dim=0)[None, ...], 0, 1)  # combine simple
 
         # Calculating the signed distance
         signed_dis, intersect_point = self.signed_dis(isbop=isbop)
 
-
         # silhouette loss
-        # rounded_image = torch.round(image_est[..., 0], decimals=3)
-        # rounded_ref = torch.round(self.image_ref[..., 0], decimals=3)
-        # vals = rounded_ref.unique()
-        # print(vals)
-
-
-        # pix_to_close_face = fragments_est.pix_to_face[..., 0]
-        # obj_masks = []
-        # for val_idx, val in enumerate(meshes_faces_num[1:]):
-        #     mesh_mask = (pix_to_close_face >= meshes_faces_num[val_idx]) & (pix_to_close_face < val)
-        #     obj_masks.append(mesh_mask)
-
         diff_rend_loss = torch.zeros(len(ref_masks))
         for mask_idx, ref_mask in enumerate(ref_masks):
             image_unique_mask = torch.where(
                 obj_masks[mask_idx] > 0, image_est[..., 3], 0)
 
-            # ref_unique_mask = torch.where(rounded_ref == val, 1., 0.)
             ref_mask_tensor = torch.from_numpy(ref_mask.astype(np.float32)).to(device)
 
             union = ((image_unique_mask + ref_mask_tensor) > 0).float()
-
             diff_rend_loss[mask_idx] = torch.sum(
                 (image_unique_mask - ref_mask_tensor)**2
             ) / torch.sum(union) # Corresponds to 1 - IoU
-            # diff_rend_loss[val_idx] = torch.sum(
-            #     (ref_unique_mask*(self.image_ref[..., 0] > 0).float()
-            #       - image_unique_mask*image_est[..., :3].sum(-1)/val)**2)
 
             out_np = K.utils.tensor_to_image((image_unique_mask - ref_mask_tensor)**2)
-            # out_np = K.utils.tensor_to_image(torch.movedim((model.image_ref - image[..., :3])**2, 3, 1))
             plt.imshow(out_np); plt.savefig("/code/src/mask-{}.png".format(mask_idx))
 
+
+        print("MODEL", 2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         # ref_depth_tensor = torch.from_numpy(
         #     ref_depth.astype(np.float32)).to(device)
@@ -423,18 +232,6 @@ class OptimizationModel(nn.Module):
         plt.imshow(out_np); plt.savefig("/code/src/depth_est.png")
         # out_np = K.utils.tensor_to_image(d_depth**2)
         # plt.imshow(out_np); plt.savefig("/code/src/depth.png")
-
-        # if binary:
-        #     d = (self.image_ref[..., 0] > 0).float() - image_est[..., 3]
-        #     d = d / torch.sum((self.image_ref[..., 0] > 0).float())
-        #     # loss = torch.nn.BCELoss()
-        #     # d = loss((self.image_ref[..., 0] > 0).float().view((-1, 1)), image_est[..., 3].view((-1, 1)))
-
-        # else:  # per instance
-        #     d = self.image_ref - image_est[..., :3]
-
-        # if debug_flag:
-        #     imsavePNG(image_est[:, :, :, 0], image_name_debug)
 
         if self.loss_func_num == 0:
             loss = torch.sum(torch.sum(d ** 2))

@@ -29,13 +29,12 @@ import kornia as K
 
 
 class Renderer(nn.Module):
-    def __init__(self, meshes, intrinsics, width, height, representation='q', image_scale=1, loss_function_num=1, BOP=False):
+    def __init__(self, meshes, intrinsics, width, height, representation='q'):
         super().__init__()
         self.meshes = meshes
         self.meshes_name = None
         self.sampled_meshes = None
         self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
-        # self.loss_func_num = loss_function_num
         self.camera_ins = None
 
         self.meshes_diameter = None
@@ -50,30 +49,6 @@ class Renderer(nn.Module):
         cam.height = height
         cam.width = width
         self.camera_ins = cam
-
-        # if BOP :
-        #     cam.intrinsic_matrix = (np.reshape(np.asarray(intrinsics_dict), (3, 3))).tolist()
-        #     cam.height = 540
-        #     cam.width = 720
-        #     self.camera_ins = cam
-        #     # Scale
-        #     # - speed-up rendering
-        #     # - need to adapt intrinsics accordingly
-        #     width, height = 720 // image_scale, 540 // image_scale
-        #     intrinsics = np.asarray(intrinsics_dict).reshape(3, 3)
-        #     intrinsics[:2, :] //= image_scale
-
-        # else:
-        #     cam.intrinsic_matrix = (np.reshape(np.asarray(intrinsics_dict["camera_matrix"]), (3, 3))).tolist()
-        #     cam.height = intrinsics_dict["image_height"]
-        #     cam.width = intrinsics_dict["image_width"]
-        #     self.camera_ins = cam
-        #     # Scale
-        #     # - speed-up rendering
-        #     # - need to adapt intrinsics accordingly
-        #     width, height = intrinsics_dict['image_width'] // image_scale, intrinsics_dict['image_height'] // image_scale
-        #     intrinsics = np.asarray(intrinsics_dict['camera_matrix']).reshape(3, 3)
-        #     intrinsics[:2, :] //= image_scale
 
         # Camera
         # - "assume that +X points left, and +Y points up and +Z points out from the image plane"
@@ -99,7 +74,7 @@ class Renderer(nn.Module):
         soft_raster_settings = RasterizationSettings(
             image_size=(height, width),
             blur_radius=np.log(1. / 1e-4 - 1.) * blend_params.sigma,
-            faces_per_pixel=100,
+            faces_per_pixel=50,
             perspective_correct=True, # TODO: Correct?
         )
         lights = PointLights(device=device, location=((0.0, 0.0, 0.0),), ambient_color=((1.0, 1.0, 1.0),),
@@ -112,21 +87,6 @@ class Renderer(nn.Module):
             ),
             # shader=SoftSilhouetteShader(blend_params=blend_params)
             shader=SoftGouraudShader(blend_params=blend_params, device=device, cameras=self.cameras, lights=lights)
-        )
-
-        # Simple Phong-shaded renderer
-        # - faster for visualization
-        hard_raster_settings = RasterizationSettings(
-            image_size=(height, width),
-            blur_radius=0.0,
-            faces_per_pixel=1,
-        )
-        self.ren_vis = MeshRenderer(
-            rasterizer=MeshRasterizer(
-                cameras=self.cameras,
-                raster_settings=hard_raster_settings
-            ),
-            shader=HardPhongShader(device=device, cameras=self.cameras, lights=lights)
         )
 
         # Placeholders for optimization parameters and the reference image
@@ -164,7 +124,6 @@ class Renderer(nn.Module):
         #     self.T_init, self.T_init_inplane = T_init, T_init @ self.T_plane_inv
         #     self.rz = nn.Parameter(torch.zeros((T_plane.shape[0]), dtype=torch.float32, device=device))
         #     self.txy = nn.Parameter(torch.zeros((T_plane.shape[0], 2), dtype=torch.float32, device=device))
-
 
     def get_R_t(self): # TODO: Check other representations, does it work?? ** Use torch.stack
         if self.representation == 'se3': #TODO: adapt this
