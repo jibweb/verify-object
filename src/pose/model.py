@@ -1,27 +1,13 @@
-import cv2
-import pytorch3d.transforms
+
 import torch
 import torch.nn as nn
-from trimesh import Trimesh
-import open3d
-from src.contour.contour import imsavePNG
+import open3d as o3d
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-from pytorch3d.transforms import (
-    matrix_to_quaternion, quaternion_to_matrix, so3_log_map, so3_exp_map, se3_log_map, se3_exp_map,
-    matrix_to_euler_angles, euler_angles_to_matrix
-)
-from pytorch3d.renderer import (
-    RasterizationSettings, MeshRenderer, MeshRasterizer,
-    PointLights, BlendParams, SoftSilhouetteShader, SoftGouraudShader, HardPhongShader,
-)
-from pytorch3d.renderer.mesh.renderer import MeshRendererWithFragments
-from pytorch3d.utils import cameras_from_opencv_projection
-from pytorch3d.structures import Meshes, join_meshes_as_scene, join_meshes_as_batch
+
 from src.collision import transformations as tra
 import numpy as np
 import cv2 as cv
-import open3d as o3d
 from src.contour import contour
 from pose.renderer import Renderer
 
@@ -37,20 +23,12 @@ class OptimizationModel(nn.Module):
         self.sampled_meshes = None
         self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
         self.loss_func_num = loss_function_num
-        # self.camera_ins = None
 
         self.meshes_diameter = None
 
         # Plane (Table in this dataset) point clouds and transformation matrix
         self.plane_pcd = None
         self.plane_T_matrix = None
-
-        # # Camera intrinsic
-        # cam = o3d.camera.PinholeCameraIntrinsic()
-        # cam.intrinsic_matrix = intrinsics.copy().tolist()
-        # cam.height = height
-        # cam.width = width
-        # self.camera_ins = cam
 
         # Set up renderer
         self.renderer = Renderer(meshes, intrinsics, width, height, representation=representation)
@@ -68,7 +46,7 @@ class OptimizationModel(nn.Module):
         is an intersection point or not
         """
         points = torch.cat([torch.tensor(self.sampled_meshes[i][None, ...], dtype=torch.float ,device=device) for i in range(len(self.sampled_meshes))],dim=0)# shape (num of meshes, num point in each obj , 6 (coordinates and norms))
-        estimated_trans_matrixes = torch.cat([T.transpose(-2, -1) for T in self.renderer.get_transform()], dim=0) # Transposed because of the open3d and pytorch difference
+        estimated_trans_matrixes = torch.cat([T.transpose(-2, -1) for T in self.renderer.get_transform()], dim=0) # Transposed because of the o3d and pytorch difference
 
         TOL_CONTACT = 0.01
 
@@ -197,7 +175,7 @@ class OptimizationModel(nn.Module):
         # Calculating the signed distance
         signed_dis, intersect_point = self.signed_dis(isbop=isbop)
 
-        # silhouette loss
+        # Silhouette loss
         diff_rend_loss = torch.zeros(len(ref_masks))
         for mask_idx, ref_mask in enumerate(ref_masks):
             image_unique_mask = torch.where(
@@ -241,45 +219,6 @@ class OptimizationModel(nn.Module):
             # loss= torch.sum(torch.sum(d ** 2)) + torch.max(signed_dis) #torch.sum(intersect_point)
             diff_rend_loss = torch.sum(diff_rend_loss)
             loss= torch.sum(diff_rend_loss) + torch.max(signed_dis) #torch.sum(intersect_point)
-            # loss= 10*torch.sum(depth_loss) #torch.sum(intersect_point)
-            # loss= diff_rend_loss + torch.max(signed_dis) #torch.sum(intersect_point)
-        # elif self.loss_func_num == 2:
-        #     loss = torch.sum(torch.sum(d ** 2)) + torch.sum(torch.clamp_min(-signed_dis, 0))
-        # elif self.loss_func_num == 3:
-        #     loss = torch.sum(torch.sum((d[d > 0]) ** 2)) / torch.sum(torch.sum(self.image_ref))
-        # elif self.loss_func_num == 4:
-        #     loss_difference = torch.sum(d[d > 0] ** 2)  # sum(squared difference within reference mask) -> 0.. if no difference, at most N[umber of pixels] in reference
-        #     loss_difference = loss_difference / torch.sum(self.image_ref)  # div by N -> [0,1]... 1 if complete outside
-        #     loss_outside = torch.sum(-d[-d > 0])  # number of pixels in estimated mask (that are not in reference mask) -> at most M (pixels in estimate)
-        #     loss_outside = loss_outside / torch.sum(image_est)  # div by M -> [0,1]... 1 if completely outside
-        #     loss = (loss_difference + loss_outside) * 100
-        # elif self.loss_func_num == 5:
-        #     loss_difference = torch.sum(d[d > 0] ** 2)  # sum(squared difference within reference mask) -> 0.. if no difference, at most N[umber of pixels] in reference
-        #     loss_difference = loss_difference / torch.sum(self.image_ref)  # div by N -> [0,1]... 1 if complete outside
-        #     loss_outside = torch.sum(-d[-d > 0])  # number of pixels in estimated mask (that are not in reference mask) -> at most M (pixels in estimate)
-        #     loss_outside = loss_outside / torch.sum(image_est)  # div by M -> [0,1]... 1 if completely outside
-        #     loss_sign = signed_dis.clip(-torch.inf, 0).mean() / signed_dis.min() #TODO: this is zero! Why ?! What should I do?
-        #     loss = (loss_difference + loss_outside + loss_sign) * 100
-        # elif self.loss_func_num == 6:
-        #     contour_diff = contour.contour_loss(
-        #         torch.sum(image_est, dim=-1),
-        #         # image_depth_est,
-        #         ref_rgb_tensor,
-        #         image_name_debug,
-        #         debug_flag
-        #     )
-        #     contour_loss = torch.sum(
-        #         contour_diff[contour_diff > 0])/(contour_diff.shape[-2] * contour_diff.shape[-1])
-
-
-        #     diff_rend_loss = torch.sum(torch.sum(d ** 2))
-        #     signed_dis_loss = torch.max(signed_dis)
-
-        #     # print(contour_loss, signed_dis_loss)
-        #     # loss = signed_dis_loss + contour_loss
-
-        #     loss = diff_rend_loss + signed_dis_loss + contour_loss *  0.0001 # 0.00001
-
         else:
             raise ValueError()
 
@@ -316,10 +255,10 @@ class OptimizationModel(nn.Module):
                 diameters = self.meshes_diameter[i]
                 mesh_pytorch = self.meshes[i]
                 # create from numpy arrays
-                d_mesh = open3d.geometry.TriangleMesh(
-                    vertices=open3d.utility.Vector3dVector(
+                d_mesh = o3d.geometry.TriangleMesh(
+                    vertices=o3d.utility.Vector3dVector(
                         mesh_pytorch.verts_list()[0].cpu().detach().numpy().copy()),
-                    triangles=open3d.utility.Vector3iVector(
+                    triangles=o3d.utility.Vector3iVector(
                         mesh_pytorch.faces_list()[0].cpu().detach().numpy().copy()))
                 simple = d_mesh.simplify_quadric_decimation(
                     int(9000))

@@ -21,7 +21,6 @@ import matplotlib.pyplot as plt
 import torchvision
 import kornia as K
 
-from torch.profiler import profile, record_function, ProfilerActivity
 
 # --------- PREPARE OUR OWN DATA
 def tq_to_m(tq):
@@ -267,15 +266,12 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
 
 
     for i in tqdm(range(max_num_iterations)):
-        # if i == 129:
-        #     print("starting from here ")
-        # update
+
 
         print("OPTIM_STEP", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         optimizer.zero_grad()
-        # with profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU], profile_memory=True, record_shapes=True) as prof:
-        # with profile(activities=[ProfilerActivity.CUDA], profile_memory=True, record_shapes=True) as prof:
+
         loss, image, signed_dis, diff_rend_loss, signed_dis_loss, contour_loss, depth_loss = model(
             ref_gray_tensor,
             reference_depth,
@@ -283,31 +279,9 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
             f"{img_debug_name}/{im_id}/{i}.png",
             debug_flag,
             isbop)  # Calling forward function
-        # print("loss : ", loss,  " image: ", torch.sum(image), diff_rend_loss, signed_dis_loss, contour_loss)
-        # print(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
 
         loss.backward()
         optimizer.step()
-
-        # import pdb; pdb.set_trace()
-
-        # out = torchvision.utils.make_grid(image, nrow=2, padding=5)
-        # out_np = K.utils.tensor_to_image(torch.movedim(image, 3, 1))
-        # cmap = plt.cm.tab20(range(20))
-        # cmap_torch = torch.Tensor(cmap[:, :3].sum(-1))
-        # other_ref = torch.from_numpy(reference_mask.astype(np.float32)).to(device)
-        # rounded_ref = torch.round(other_ref.sum(-1), decimals=4)
-        # vals = rounded_ref.unique()
-        # print(vals)
-        # rounded_image = torch.round(image[...,:3].sum(-1), decimals=4)
-        # for val_idx, val in enumerate(vals[1:]):
-        #     image_unique_mask = torch.where(
-        #         rounded_image == val, rounded_image / val, 0)
-        #     ref_unique_mask = torch.where(
-        #         rounded_ref == val, rounded_ref / val, 0)
-        #     out_np = K.utils.tensor_to_image((image_unique_mask-ref_unique_mask)**2)
-        #     # out_np = K.utils.tensor_to_image(torch.movedim((model.image_ref - image[..., :3])**2, 3, 1))
-        #     plt.imshow(out_np); plt.savefig("/code/src/optim{:05d}-{}.png".format(i, val_idx))
 
         out_np = K.utils.tensor_to_image(torch.movedim(image[..., :3], 3, 1))
         plt.imshow(out_np); plt.savefig("/code/debug/optim{:05d}.png".format(i))

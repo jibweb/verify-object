@@ -1,10 +1,6 @@
-import cv2
-import pytorch3d.transforms
+
 import torch
 import torch.nn as nn
-from trimesh import Trimesh
-import open3d
-from src.contour.contour import imsavePNG
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 from pytorch3d.transforms import (
@@ -20,9 +16,7 @@ from pytorch3d.utils import cameras_from_opencv_projection
 from pytorch3d.structures import Meshes, join_meshes_as_scene, join_meshes_as_batch
 from src.collision import transformations as tra
 import numpy as np
-import cv2 as cv
 import open3d as o3d
-from src.contour import contour
 
 import matplotlib.pyplot as plt
 import kornia as K
