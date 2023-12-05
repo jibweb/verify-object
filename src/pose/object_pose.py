@@ -261,6 +261,11 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         if not os.path.exists(f"../{img_debug_name}/{im_id}/"):
             os.makedirs(f"../{img_debug_name}/{im_id}/")
 
+    reference_masks_tensors = [
+        torch.from_numpy(mask.astype(np.float32)).to(device)
+        for mask in reference_masks]
+
+
     for i in tqdm(range(max_num_iterations)):
         # if i == 129:
         #     print("starting from here ")
@@ -274,7 +279,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         loss, image, signed_dis, diff_rend_loss, signed_dis_loss, contour_loss, depth_loss = model(
             ref_gray_tensor,
             reference_depth,
-            reference_masks,
+            reference_masks_tensors,
             f"{img_debug_name}/{im_id}/{i}.png",
             debug_flag,
             isbop)  # Calling forward function
@@ -305,7 +310,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         #     plt.imshow(out_np); plt.savefig("/code/src/optim{:05d}-{}.png".format(i, val_idx))
 
         out_np = K.utils.tensor_to_image(torch.movedim(image[..., :3], 3, 1))
-        plt.imshow(out_np); plt.savefig("/code/src/optim{:05d}.png".format(i))
+        plt.imshow(out_np); plt.savefig("/code/debug/optim{:05d}.png".format(i))
         print("LOSSES:", diff_rend_loss, signed_dis_loss, contour_loss, depth_loss)
 
         # early stopping

@@ -18,6 +18,7 @@ import config
 import trimesh
 from matplotlib import pyplot as plt
 import cv2
+from collision.point_clouds_utils import project_point_cloud
 
 from actionlib import SimpleActionServer
 import rospy
@@ -158,10 +159,10 @@ class VerifyPose:
             (bbox.x_offset, bbox.y_offset,
              bbox.x_offset + bbox.width, bbox.y_offset + bbox.height)
             for bbox in goal.bounding_boxes]
-        intrinsics = self.intrinsics
+        intrinsics = self.intrinsics.copy()
 
-        cv2.imwrite("/code/src/input_depth.png", depth)
-        cv2.imwrite("/code/src/input_color.png", rgb)
+        cv2.imwrite("/code/debug/input_depth.png", depth)
+        cv2.imwrite("/code/debug/input_color.png", rgb)
 
         if self.scale != 1:
             rgb = cv2.resize(rgb, (rgb.shape[1] // self.scale, rgb.shape[0] // self.scale))
@@ -218,13 +219,11 @@ class VerifyPose:
                 rgb, depth, intrinsics, max_dist=1.0)
 
             # Create the filtered scene depth image
-            scene_pts = np.asarray(scene.points)
-            us = scene_pts[:, 0] / scene_pts[:, 2] * intrinsics[0, 0] + intrinsics[0, 2]
-            vs = scene_pts[:, 1] / scene_pts[:, 2] * intrinsics[1, 1] + intrinsics[1, 2]
+            scene_depth = project_point_cloud(
+                scene, intrinsics, reference_height, reference_width)
 
-            scene_depth = np.zeros((reference_height, reference_width))
-            us, vs = us.astype(int), vs.astype(int)
-            scene_depth[vs, us] = scene_pts[:, 2]
+            plane_depth = project_point_cloud(
+                plane, intrinsics, reference_height, reference_width)
 
         # Filter detection based on depth =====================================
         perc_valid_depth_per_det = []
@@ -252,15 +251,28 @@ class VerifyPose:
 
         # Prepare target silhouettes ==========================================
         masks = self.create_masks_from_bounding_boxes(bounding_boxes, reference_height, reference_width)
+        # masks2 = self.refine_masks_with_scene_depth(masks, scene_depth)
+        # masks3 = [
+        #     np.logical_and(mask.astype(bool), plane_depth == 0)
+        #     for mask in masks
+        # ]
+
 
         # Create colored instance mask
         reference_mask = np.zeros((reference_height, reference_width, 3))
+        # reference_mask2 = np.zeros((reference_height, reference_width, 3))
+        # reference_mask3 = np.zeros((reference_height, reference_width, 3))
         for mask_idx, mask in enumerate(masks):
             reference_mask[mask] = self.cmap[mask_idx, :3]
+            # reference_mask2[masks2[mask_idx]] = self.cmap[mask_idx, :3]
+            # reference_mask3[masks3[mask_idx]] = self.cmap[mask_idx, :3]
 
 
-        plt.imshow(reference_mask); plt.savefig("/code/src/ref_mask.png")
-        plt.imshow(scene_depth); plt.savefig("/code/src/ref_depth.png")
+        plt.imshow(reference_mask); plt.savefig("/code/debug/ref_mask.png")
+        # plt.imshow(reference_mask2); plt.savefig("/code/debug/ref_mask2.png")
+        # plt.imshow(reference_mask3); plt.savefig("/code/debug/ref_mask3.png")
+        plt.imshow(scene_depth); plt.savefig("/code/debug/ref_depth.png")
+        # plt.imshow(plane_depth); plt.savefig("/code/debug/ref_plane_depth.png")
 
         # Set up optimization =================================================
         # create scene geometry from known meshes

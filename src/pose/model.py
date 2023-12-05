@@ -37,7 +37,7 @@ class OptimizationModel(nn.Module):
         self.sampled_meshes = None
         self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
         self.loss_func_num = loss_function_num
-        self.camera_ins = None
+        # self.camera_ins = None
 
         self.meshes_diameter = None
 
@@ -45,12 +45,12 @@ class OptimizationModel(nn.Module):
         self.plane_pcd = None
         self.plane_T_matrix = None
 
-        # Camera intrinsic
-        cam = o3d.camera.PinholeCameraIntrinsic()
-        cam.intrinsic_matrix = intrinsics.copy().tolist()
-        cam.height = height
-        cam.width = width
-        self.camera_ins = cam
+        # # Camera intrinsic
+        # cam = o3d.camera.PinholeCameraIntrinsic()
+        # cam.intrinsic_matrix = intrinsics.copy().tolist()
+        # cam.height = height
+        # cam.width = width
+        # self.camera_ins = cam
 
         # Set up renderer
         self.renderer = Renderer(meshes, intrinsics, width, height, representation=representation)
@@ -192,6 +192,7 @@ class OptimizationModel(nn.Module):
         image_est, image_depth_est, obj_masks, fragments_est = self.renderer()
 
         contour_loss = None
+        print("MODEL", 2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         # Calculating the signed distance
         signed_dis, intersect_point = self.signed_dis(isbop=isbop)
@@ -202,18 +203,17 @@ class OptimizationModel(nn.Module):
             image_unique_mask = torch.where(
                 obj_masks[mask_idx] > 0, image_est[..., 3], 0)
 
-            ref_mask_tensor = torch.from_numpy(ref_mask.astype(np.float32)).to(device)
 
-            union = ((image_unique_mask + ref_mask_tensor) > 0).float()
+            union = ((image_unique_mask + ref_mask) > 0).float()
             diff_rend_loss[mask_idx] = torch.sum(
-                (image_unique_mask - ref_mask_tensor)**2
+                (image_unique_mask - ref_mask)**2
             ) / torch.sum(union) # Corresponds to 1 - IoU
 
-            out_np = K.utils.tensor_to_image((image_unique_mask - ref_mask_tensor)**2)
-            plt.imshow(out_np); plt.savefig("/code/src/mask-{}.png".format(mask_idx))
+            out_np = K.utils.tensor_to_image((image_unique_mask - ref_mask)**2)
+            plt.imshow(out_np); plt.savefig("/code/debug/mask-{}.png".format(mask_idx))
 
 
-        print("MODEL", 2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
+        print("MODEL", 3, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         # ref_depth_tensor = torch.from_numpy(
         #     ref_depth.astype(np.float32)).to(device)
@@ -229,7 +229,7 @@ class OptimizationModel(nn.Module):
         # print("Depth", image_depth_est.min(), image_depth_est.max(), ref_depth_tensor.min(), ref_depth_tensor.max())
 
         out_np = K.utils.tensor_to_image(image_depth_est)
-        plt.imshow(out_np); plt.savefig("/code/src/depth_est.png")
+        plt.imshow(out_np); plt.savefig("/code/debug/depth_est.png")
         # out_np = K.utils.tensor_to_image(d_depth**2)
         # plt.imshow(out_np); plt.savefig("/code/src/depth.png")
 

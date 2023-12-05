@@ -56,12 +56,13 @@ class Renderer(nn.Module):
         # - see https://github.com/facebookresearch/pytorch3d/blob/main/docs/notes/renderer_getting_started.md
         # - this is different from, e.g., OpenCV -> inverting focal length achieves the coordinate flip (hacky solution)
         # - see https://github.com/facebookresearch/pytorch3d/issues/522#issuecomment-762793832
-        intrinsics[0, 0] *= -1  # Based on the differentiation between the coordinate systems: negative focal length
-        intrinsics[1, 1] *= -1
-        intrinsics = intrinsics.astype(np.float32)
+        ren_intrinsics = intrinsics.copy()
+        ren_intrinsics[0, 0] *= -1  # Based on the differentiation between the coordinate systems: negative focal length
+        ren_intrinsics[1, 1] *= -1
+        ren_intrinsics = ren_intrinsics.astype(np.float32)
         cameras = cameras_from_opencv_projection(R=torch.from_numpy(np.eye(4, dtype=np.float32)[None, ...]),
                                                  tvec=torch.from_numpy(np.asarray([[0, 0, 0]]).astype(np.float32)),
-                                                 camera_matrix=torch.from_numpy(intrinsics[:3, :3][None, ...]),
+                                                 camera_matrix=torch.from_numpy(ren_intrinsics[:3, :3][None, ...]),
                                                  image_size=torch.from_numpy(
                                                      np.asarray([[height, width]]).astype(np.float32)))
         self.cameras = cameras.to(device)
