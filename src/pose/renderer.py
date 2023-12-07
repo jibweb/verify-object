@@ -152,9 +152,7 @@ class Renderer(nn.Module):
         # Render the silhouette using the estimated pose
         R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
 
-        binary = True
         as_scene = True
-        contour_loss = None
 
         if as_scene:  # 1 image
             meshes_transformed = []

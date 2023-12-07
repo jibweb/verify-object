@@ -1,21 +1,14 @@
 import argparse
-# import pandas as pd
 import numpy as np
 import os
 import torch
 import yaml
-from pytorch3d.io import load_obj
-from pytorch3d.structures import Meshes
-from pytorch3d.renderer import TexturesVertex
 from pose.model import OptimizationModel
 import pose.object_pose as object_pose
-import json
-from collision.environment import scene_point_clouds
 from collision.plane_detector import PlaneDetector
 from src.contour.contour import compute_sdf_image
 from utility.logger import Logger
-import config
-import trimesh
+from config import config
 from matplotlib import pyplot as plt
 import cv2
 from collision.point_clouds_utils import project_point_cloud
@@ -29,6 +22,7 @@ from tracebot_msgs.msg import VerifyObjectAction, VerifyObjectGoal, VerifyObject
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 torch.autograd.set_detect_anomaly(True)  # To check whether we have nan or inf in our gradient calculation
+
 
 
 SUPPORTED_OBJECTS = [
@@ -46,7 +40,7 @@ PROJECT_TO_INTERNAL_NAMES = {
 
 class VerifyPose:
 
-    def __init__(self, name, debug_flag=False, intrinsics_from_file=False):
+    def __init__(self, name, cfg, debug_flag=False, intrinsics_from_file=False):
 
         self.debug_flag = debug_flag
 
@@ -73,46 +67,36 @@ class VerifyPose:
 
         # TODO: set from rosparam:
         mesh_num_samples = 500
-        representation = 'q' # choices=['so3', 'se3', 'q'], help='q for [q, t], so3 for [so3_log(R), t] or se3 for se3_log([R, t])'
-        objects_path = os.path.join(config.PATH_DATASET_TRACEBOT, 'objects')
+        # representation = 'q' # choices=['so3', 'se3', 'q'], help='q for [q, t], so3 for [so3_log(R), t] or se3 for se3_log([R, t])'
+        # objects_path = cfg.objects_path
         # self.mask_path = os.path.join(config.PATH_DATASET_TRACEBOT, 'scenes')
         self.scale = self.camera_info.width // 640
         self.intrinsics = np.array(self.camera_info.K).reshape(3,3)
         self.intrinsics[:2, :] //= self.scale
 
 
-        self.lr = 0.015 #,
-        #     0.02,
-        #    0.04,
-        #    0.06,
-        # ]
-
+        self.cfg = cfg
+        # self.lr = cfg.optim.learning_rate
         self.loss_num = 1
-        # loss_number_list = [
-        #     # 0,
-        #     # 1,
-        #     # 2,
-        #     # 3,
-        #     # 4,
-        #     # 5,
-        #     6,
-        # ]
-        self.optimizer_name = 'adam'
-        self.optimizer_type = {
-            'adam': torch.optim.Adam,
-            #'adagrad': torch.optim.Adagrad,
-            #'RMSprop': torch.optim.RMSprop,
-            #'SGD': torch.optim.SGD,
-            #'LBFGS': torch.optim.LBFGS
-        }[self.optimizer_name]
-        self.max_num_iterations = 200
-        self.early_stopping_loss = 0.5 #350 #TODO adapt to scene automatically
+        # # loss_number_list = [
+        # #     # 0,
+        # #     # 1,
+        # #     # 2,
+        # #     # 3,
+        # #     # 4,
+        # #     # 5,
+        # #     6,
+        # # ]
+        # self.optimizer_name = cfg.optim.optimizer_name
+
+        # self.max_num_iterations = cfg.optim.max_iter
+        # self.early_stopping_loss = cfg.optim.early_stopping_loss #0.5 #350 #TODO adapt to scene automatically
 
         # load all meshes that will be needed
         self.cmap = plt.cm.tab20(range(20)) # 20 different colors, two consecutive ones are similar (for two instances)
         self.meshes, self.sampled_down_meshes = object_pose.load_objects_models(
-            SUPPORTED_OBJECTS, objects_path,
-            cmap=self.cmap, mesh_num_samples=mesh_num_samples)
+            SUPPORTED_OBJECTS, cfg.objects_path,
+            cmap=self.cmap, mesh_num_samples=cfg.mesh_num_samples)
 
         # Renderer
 
@@ -122,9 +106,9 @@ class VerifyPose:
             None,
             self.intrinsics,
             self.camera_info.width // self.scale, self.camera_info.height // self.scale,
-            representation=representation,
-            image_scale=self.scale,
-            loss_function_num=self.loss_num).to(device)
+            cfg.optim,
+            # representation=cfg.optim.pose_representation,
+            image_scale=self.scale).to(device)
 
         # create server
         self._server = SimpleActionServer(name, VerifyObjectAction, execute_cb=self.callback, auto_start=False)
@@ -174,18 +158,12 @@ class VerifyPose:
 
             depth = cv2.resize(depth, (depth.shape[1] // self.scale, depth.shape[0] // self.scale)) # TODO: check size to see if scaling is necessary
 
-            # from skimage.transform import resize
-            # reference_width //= self.scale
-            # reference_height //= self.scale
-            # rgb = resize(rgb[..., :3], (reference_height, reference_width))
-            # reference_mask = resize(reference_mask, (reference_height, reference_width))
-
         reference_height, reference_width = rgb.shape[:2]
 
         t_mag = 1
         scene_name = "ros_test_scene"
-        logger = Logger(log_dir=os.path.join(config.PATH_REPO, f"logs/{scene_name}/loss_num_{self.loss_num}/{self.optimizer_name}"),
-                                    log_name=f"{scene_name}_opt_{self.optimizer_name}_lr_{self.lr}",
+        logger = Logger(log_dir=os.path.join(config.PATH_REPO, f"logs/{scene_name}/loss_num_{self.loss_num}/{self.cfg.optim.optimizer_name}"),
+                                    log_name=f"{scene_name}_opt_{self.cfg.optim.optimizer_name}_lr_{self.cfg.optim.learning_rate}",
                                     reset_num_timesteps=True)
 
         print("------- Scene number: ", scene_name)
@@ -201,12 +179,6 @@ class VerifyPose:
         # for im_id in range(1, number_of_scene_image+1): # range(1, number_of_scene_image+1)
         # im_id = 37
         print(f"im {im_id}: optimizing...")
-
-        # Depending on how many objects in the scene, sum all of them up together
-        # reference_mask = np.zeros((rgb.shape[0], rgb.shape[1]), dtype=np.float32)
-        # for num_obj, obj_mask in enumerate(masks):
-        #     # TODO make sure that mask for num_obj corresponds to pose in T_gt_list and the ith model in the scene
-        #     reference_mask[obj_mask > 0] = num_obj+1
 
 
         # Extract plane =======================================================
@@ -292,22 +264,13 @@ class VerifyPose:
             scene_obj_names.append(object_name)
 
         # Adding the properties to the model
-        # self.model.meshes = scene_meshes
         self.model.renderer.meshes = scene_meshes
         self.model.sampled_meshes = scene_sampled_mesh
-        # self.model.renderer.sampled_meshes = scene_sampled_mesh
-        # self.model.meshes_name = scene_obj_names
         self.model.renderer.meshes_name = scene_obj_names
 
         self.model.plane_T_matrix = torch.from_numpy(T).type(torch.FloatTensor).to(device)
         self.model.plane_pcd = plane
 
-        # If the loss num = 6, calculate the 2D SDF
-        if self.model.loss_func_num == 6:
-            # Calculating the sdf image for the contour based loss
-            sdf_image = compute_sdf_image(rgb, reference_mask)
-        else:
-            sdf_image = None
 
         T_init_list = [torch.from_numpy(pose[None, ...]).to(device)
                      for pose in init_poses]
@@ -315,9 +278,9 @@ class VerifyPose:
 
         # Perform optimization ================================================
         best_metrics, iter_values = object_pose.optimization_step(
-            self.model, rgb, scene_depth, masks, T_init_list, None, sdf_image,
-            self.optimizer_type, self.max_num_iterations, self.early_stopping_loss, self.lr,
-            logger, im_id, self.debug_flag, f"debug/{scene_name}/loss_num_{self.loss_num}/{self.optimizer_name}/{self.lr}",
+            self.model, rgb, scene_depth, masks, T_init_list, None, self.cfg.optim,
+            #self.optimizer_name, self.max_num_iterations, self.early_stopping_loss, self.lr,
+            logger, im_id, self.debug_flag, f"debug/{scene_name}/loss_num_{self.loss_num}/{self.cfg.optim.optimizer_name}/{self.cfg.optim.learning_rate}",
             isbop=False)
 
         best_R_list, best_t_list = self.model.get_R_t()
@@ -400,9 +363,12 @@ if __name__ == "__main__":
     parser.add_argument('--intrinsics_from_file', dest='intrinsics_from_file', default=False, action='store_true')
     args = parser.parse_args()
 
+    cfg = config.GlobalConfig()
+
     rospy.init_node('verify_object')
     node = VerifyPose(
         rospy.get_name(),
+        cfg,
         debug_flag=args.debug,
         intrinsics_from_file=args.intrinsics_from_file)
     rospy.spin()

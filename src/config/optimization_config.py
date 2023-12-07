@@ -1,0 +1,32 @@
+from .simple_configuration import BaseConfig
+from dataclasses import dataclass, field
+from enum import Enum
+
+# class PoseRepresentation(Enum):
+#     Q = 1 # choices=['so3', 'se3', 'q'], help='q for [q, t], so3 for [so3_log(R), t] or se3 for se3_log([R, t])'
+
+
+@dataclass
+class LossConfig(BaseConfig):
+    active : bool = True
+    early_stopping_loss : float = 1.
+
+
+@dataclass
+class LossesConfig(BaseConfig):
+    silhouette_loss : LossConfig = field(
+        default_factory=lambda: LossConfig(active=True, early_stopping_loss=0.3))
+    collision_loss : LossConfig = field(
+        default_factory=lambda: LossConfig(active=True, early_stopping_loss=0.05))
+    contour_loss : LossConfig = field(
+        default_factory=lambda: LossConfig(active=False, early_stopping_loss=0.7))
+    depth_loss : LossConfig = field(
+        default_factory=lambda: LossConfig(active=False, early_stopping_loss=0.7))
+
+@dataclass
+class OptimizationConfig(BaseConfig):
+    learning_rate: float = 0.015
+    optimizer_name: str = 'adam'
+    max_iter: int = 200
+    pose_representation : str = 'q'  # choices=['so3', 'se3', 'q'], help='q for [q, t], so3 for [so3_log(R), t] or se3 for se3_log([R, t])'
+    losses : LossesConfig = field(default_factory=LossesConfig)

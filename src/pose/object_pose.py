@@ -224,12 +224,19 @@ def scene_optimization(logger, t_mag, isbop, scene_path, mask_path, scene_number
     return best_metrics, iter_values
 
 
-def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_init_list, T_igt_list, ref_gray_tensor,
-        optimizer_type, max_num_iterations, early_stopping_loss, lr,
+def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_init_list, T_igt_list, optim_cfg,
         logger, im_id, debug_flag, img_debug_name,
         isbop):
     # For visualization
     iter_values = {"r": [], "t": [], "loss": [], "image_id": im_id}
+
+    # If the loss num = 6, calculate the 2D SDF
+    if optim_cfg.losses.contour_loss.active:
+        # Calculating the sdf image for the contour based loss
+        sdf_image = compute_sdf_image(reference_rgb, reference_masks)
+    else:
+        sdf_image = None
+
 
     # Initializate model
     T_init_list_transposed = [T_init.transpose(-2, -1) for T_init in T_init_list]
@@ -244,6 +251,9 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
 
 
     # Optimization
+    scene_early_stopping_loss = len(T_init_list) * sum(
+        [v.early_stopping_loss for k, v in optim_cfg.losses.__dict__.items() if v.active]
+    )
 
     # Prepare events, recording time
     start = torch.cuda.Event(enable_timing=True)
@@ -251,7 +261,15 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
     # Record start
     start.record()
 
-    optimizer = optimizer_type(model.parameters(), lr=lr)  # TODO try different optimizers
+    optimizer_type = {
+            'adam': torch.optim.Adam,
+            #'adagrad': torch.optim.Adagrad,
+            #'RMSprop': torch.optim.RMSprop,
+            #'SGD': torch.optim.SGD,
+            #'LBFGS': torch.optim.LBFGS
+        }[optim_cfg.optimizer_name]
+
+    optimizer = optimizer_type(model.parameters(), lr=optim_cfg.learning_rate)  # TODO try different optimizers
     best_metrics, best_metrics_str = metrics, metrics_str
     best_T_list = T_init_list
     best_R_list, best_t_list = model.get_R_t()
@@ -265,7 +283,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         for mask in reference_masks]
 
 
-    for i in tqdm(range(max_num_iterations)):
+    for i in tqdm(range(optim_cfg.max_iter)):
 
 
         print("OPTIM_STEP", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
@@ -273,7 +291,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         optimizer.zero_grad()
 
         loss, image, signed_dis, diff_rend_loss, signed_dis_loss, contour_loss, depth_loss = model(
-            ref_gray_tensor,
+            reference_rgb,
             reference_depth,
             reference_masks_tensors,
             f"{img_debug_name}/{im_id}/{i}.png",
@@ -288,7 +306,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         print("LOSSES:", diff_rend_loss, signed_dis_loss, contour_loss, depth_loss)
 
         # early stopping
-        if loss.item() < early_stopping_loss:
+        if loss.item() < scene_early_stopping_loss:
             break
 
         # logging

@@ -16,13 +16,13 @@ import matplotlib.pyplot as plt
 import kornia as K
 
 class OptimizationModel(nn.Module):
-    def __init__(self, meshes, intrinsics, width, height, representation='q', image_scale=1, loss_function_num=1, BOP=False):
+    def __init__(self, meshes, intrinsics, width, height, cfg, image_scale=1, BOP=False):
         super().__init__()
         self.meshes = meshes
         self.meshes_name = None
         self.sampled_meshes = None
         self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
-        self.loss_func_num = loss_function_num
+        self.cfg = cfg
 
         self.meshes_diameter = None
 
@@ -31,7 +31,7 @@ class OptimizationModel(nn.Module):
         self.plane_T_matrix = None
 
         # Set up renderer
-        self.renderer = Renderer(meshes, intrinsics, width, height, representation=representation)
+        self.renderer = Renderer(meshes, intrinsics, width, height, representation=cfg.pose_representation)
 
         self.image_ref = None  # Image mask reference
 
@@ -164,31 +164,35 @@ class OptimizationModel(nn.Module):
     def get_R_t(self):
         return self.renderer.get_R_t()
 
-    def forward(self, ref_rgb_tensor, ref_depth, ref_masks, image_name_debug, debug_flag, isbop):
+    def forward(self, ref_rgb, ref_depth, ref_masks, image_name_debug, debug_flag, isbop):
         print("MODEL", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
         # Render the silhouette using the estimated pose
         image_est, image_depth_est, obj_masks, fragments_est = self.renderer()
 
+        loss = torch.zeros(1).to(device)
         contour_loss = None
         print("MODEL", 2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
-        # Calculating the signed distance
-        signed_dis, intersect_point = self.signed_dis(isbop=isbop)
-
         # Silhouette loss
-        diff_rend_loss = torch.zeros(len(ref_masks))
-        for mask_idx, ref_mask in enumerate(ref_masks):
-            image_unique_mask = torch.where(
-                obj_masks[mask_idx] > 0, image_est[..., 3], 0)
+        if self.cfg.losses.silhouette_loss.active:
+            diff_rend_loss = torch.zeros(len(ref_masks)).to(device)
+            for mask_idx, ref_mask in enumerate(ref_masks):
+                image_unique_mask = torch.where(
+                    obj_masks[mask_idx] > 0, image_est[..., 3], 0)
 
 
-            union = ((image_unique_mask + ref_mask) > 0).float()
-            diff_rend_loss[mask_idx] = torch.sum(
-                (image_unique_mask - ref_mask)**2
-            ) / torch.sum(union) # Corresponds to 1 - IoU
+                union = ((image_unique_mask + ref_mask) > 0).float()
+                diff_rend_loss[mask_idx] = torch.sum(
+                    (image_unique_mask - ref_mask)**2
+                ) / torch.sum(union) # Corresponds to 1 - IoU
 
-            out_np = K.utils.tensor_to_image((image_unique_mask - ref_mask)**2)
-            plt.imshow(out_np); plt.savefig("/code/debug/mask-{}.png".format(mask_idx))
+                out_np = K.utils.tensor_to_image((image_unique_mask - ref_mask)**2)
+                plt.imshow(out_np); plt.savefig("/code/debug/mask-{}.png".format(mask_idx))
+
+            diff_rend_loss = torch.sum(diff_rend_loss)
+            loss += diff_rend_loss
+        else:
+            diff_rend_loss = None
 
 
         print("MODEL", 3, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
@@ -211,16 +215,24 @@ class OptimizationModel(nn.Module):
         # out_np = K.utils.tensor_to_image(d_depth**2)
         # plt.imshow(out_np); plt.savefig("/code/src/depth.png")
 
-        if self.loss_func_num == 0:
-            loss = torch.sum(torch.sum(d ** 2))
-        elif self.loss_func_num == 1:
+        # if self.loss_func_num == 0:
+        #     loss = torch.sum(torch.sum(d ** 2))
+        # elif self.loss_func_num == 1:
+
+        # Collision loss
+        if self.cfg.losses.collision_loss.active:
+            # Calculating the signed distance
+            signed_dis, intersect_point = self.signed_dis(isbop=isbop)
             signed_dis_loss = torch.max(signed_dis)
+            loss += torch.max(signed_dis_loss)
+        else:
+            signed_dis_loss = None
             # diff_rend_loss = torch.sum(torch.sum(d ** 2))
             # loss= torch.sum(torch.sum(d ** 2)) + torch.max(signed_dis) #torch.sum(intersect_point)
-            diff_rend_loss = torch.sum(diff_rend_loss)
-            loss= torch.sum(diff_rend_loss) + torch.max(signed_dis) #torch.sum(intersect_point)
-        else:
-            raise ValueError()
+            # diff_rend_loss = torch.sum(diff_rend_loss)
+            # loss= torch.sum(diff_rend_loss) + torch.max(signed_dis) #torch.sum(intersect_point)
+        # else:
+        #     raise ValueError()
 
         return loss, image_est, None, diff_rend_loss, signed_dis_loss, contour_loss, depth_loss # signed_dis
 
