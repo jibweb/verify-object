@@ -224,7 +224,8 @@ def scene_optimization(logger, t_mag, isbop, scene_path, mask_path, scene_number
     return best_metrics, iter_values
 
 
-def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_init_list, T_igt_list, optim_cfg,
+def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_init_list,
+        optim_cfg, T_igt_list,
         logger, im_id, debug_flag, img_debug_name,
         isbop):
     # For visualization
@@ -249,10 +250,9 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
     else:
         metrics, metrics_str = {"ADI": 1, "ADD": 1}, "No grountruth available for metrics"
 
-
     # Optimization
     scene_early_stopping_loss = len(T_init_list) * sum(
-        [v.early_stopping_loss for k, v in optim_cfg.losses.__dict__.items() if v.active]
+        [v.weight * v.early_stopping_loss for k, v in optim_cfg.losses.__dict__.items() if v.active]
     )
 
     # Prepare events, recording time
@@ -288,7 +288,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
 
         optimizer.zero_grad()
 
-        loss, image, signed_dis, diff_rend_loss, signed_dis_loss, contour_loss, depth_loss = model(
+        loss, image, losses_values = model(
             reference_rgb,
             reference_depth,
             reference_masks_tensors,
@@ -297,9 +297,10 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         loss.backward()
         optimizer.step()
 
-        out_np = K.utils.tensor_to_image(torch.movedim(image[..., :3], 3, 1))
-        plt.imshow(out_np); plt.savefig("/code/debug/optim{:05d}.png".format(i))
-        print("LOSSES:", diff_rend_loss, signed_dis_loss, contour_loss, depth_loss)
+        if debug_flag:
+            out_np = K.utils.tensor_to_image(torch.movedim(image[..., :3], 3, 1))
+            plt.imshow(out_np); plt.savefig("/code/debug/optim{:05d}.png".format(i))
+        print("LOSSES:", " | ".join([f"{name}: {loss_val:.3f}" for name, loss_val in losses_values.items()]))
 
         # early stopping
         if loss.item() < scene_early_stopping_loss:
@@ -307,10 +308,10 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
 
         # logging
         logger.record(f"loss_value_{im_id}", loss.item())
-        logger.record(f"diff_rend_loss_value_{im_id}", diff_rend_loss.item())
-        logger.record(f"signed_dis_loss_value_{im_id}", signed_dis_loss.item())
-        if contour_loss is not None:
-            logger.record(f"contour_loss_value_{im_id}", contour_loss.item())
+        # logger.record(f"diff_rend_loss_value_{im_id}", diff_rend_loss.item())
+        # logger.record(f"signed_dis_loss_value_{im_id}", signed_dis_loss.item())
+        # if contour_loss is not None:
+        #     logger.record(f"contour_loss_value_{im_id}", contour_loss.item())
         logger.record(f"ADD_value_{im_id}", metrics['ADD'])
         # logger.dump(step=i)
 

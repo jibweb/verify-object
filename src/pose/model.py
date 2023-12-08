@@ -46,13 +46,16 @@ class OptimizationModel(nn.Module):
         is an intersection point or not
         """
         points = torch.cat([torch.tensor(self.sampled_meshes[i][None, ...], dtype=torch.float ,device=device) for i in range(len(self.sampled_meshes))],dim=0)# shape (num of meshes, num point in each obj , 6 (coordinates and norms))
-        estimated_trans_matrixes = torch.cat([T.transpose(-2, -1) for T in self.renderer.get_transform()], dim=0) # Transposed because of the o3d and pytorch difference
+        estimated_trans_matrixes = torch.cat([T for T in self.renderer.get_transform()], dim=0) # Transposed because of the o3d and pytorch difference
 
         TOL_CONTACT = 0.01
 
         # === 1) all objects into plane space
         plane_T_matrix = torch.inverse(self.plane_T_matrix)
         transome_matrixes = plane_T_matrix @ estimated_trans_matrixes
+
+        # print("estimated_trans_matrixes", estimated_trans_matrixes)
+        # print("transome_matrixes", transome_matrixes)
 
         points_in_plane = (transome_matrixes[:, :3, :3] @ points[..., :3].transpose(2, 1)).transpose(2, 1) + transome_matrixes[ :, :3, 3][:, None, :]
 
@@ -170,7 +173,7 @@ class OptimizationModel(nn.Module):
         image_est, depth_est, obj_masks, fragments_est = self.renderer()
 
         loss = torch.zeros(1).to(device)
-        contour_loss = None
+        losses_values = {}
         print("MODEL", 2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         # Silhouette loss -----------------------------------------------------
@@ -192,11 +195,21 @@ class OptimizationModel(nn.Module):
 
             diff_rend_loss = torch.sum(diff_rend_loss)
             loss += diff_rend_loss
-        else:
-            diff_rend_loss = None
+            losses_values['silhouette'] = diff_rend_loss.item()
 
+        # Collision loss ------------------------------------------------------
+        if self.cfg.losses.collision_loss.active:
+            # Calculating the signed distance
+            signed_dis, intersect_point = self.signed_dis()
+            signed_dis_loss = torch.max(signed_dis)
+            loss += signed_dis_loss
+            losses_values['collision'] = signed_dis_loss.item()
 
-        print("MODEL", 3, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
+        # Contour loss --------------------------------------------------------
+        if self.cfg.losses.contour_loss.active:
+            contour_loss = torch.zeros(1).to(device)
+            loss += contour_loss
+            losses_values['contour'] = contour_loss.item()
 
         # Depth loss ----------------------------------------------------------
         if self.cfg.losses.depth_loss.active:
@@ -204,29 +217,20 @@ class OptimizationModel(nn.Module):
                 ref_depth.astype(np.float32)).to(device)
             # ref_depth_tensor *= (self.image_ref[..., 0] > 0).float()
             # d_depth = (ref_depth_tensor - depth_est)
-
             # depth = torch.gather(zbuf, 0, depth_indices[..., None])
             d_depth = (depth_est - ref_depth_tensor[None, ..., None])[depth_est > 0]
 
             # depth_loss = torch.sum(d_depth**2) / torch.sum((zbuf > -1).float())
             depth_loss = torch.sum(d_depth**2) / (d_depth.shape[0])
-        else:
-            depth_loss = None
+            losses_values['depth'] = depth_loss.item()
 
         if debug_flag:
             out_np = K.utils.tensor_to_image(depth_est)
             plt.imshow(out_np); plt.savefig("/code/debug/depth_est.png")
 
-        # Collision loss ------------------------------------------------------
-        if self.cfg.losses.collision_loss.active:
-            # Calculating the signed distance
-            signed_dis, intersect_point = self.signed_dis()
-            signed_dis_loss = torch.max(signed_dis)
-            loss += torch.max(signed_dis_loss)
-        else:
-            signed_dis_loss = None
+        print("MODEL", 3, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
-        return loss, image_est, None, diff_rend_loss, signed_dis_loss, contour_loss, depth_loss # signed_dis
+        return loss, image_est, losses_values
 
     def evaluate_progress(self, T_igt_list, isbop): # TODO: for checking
         # note: we use the [[R, t], [0, 1]] convention here -> transpose all matrices

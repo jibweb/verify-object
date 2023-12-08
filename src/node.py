@@ -121,8 +121,9 @@ class VerifyPose:
             for bbox in goal.bounding_boxes]
         intrinsics = self.intrinsics.copy()
 
-        cv2.imwrite("/code/debug/input_depth.png", depth)
-        cv2.imwrite("/code/debug/input_color.png", rgb)
+        if self.debug_flag:
+            cv2.imwrite("/code/debug/input_depth.png", depth)
+            cv2.imwrite("/code/debug/input_color.png", rgb)
 
         if self.scale != 1:
             rgb = cv2.resize(rgb, (rgb.shape[1] // self.scale, rgb.shape[0] // self.scale))
@@ -215,12 +216,12 @@ class VerifyPose:
             # reference_mask2[masks2[mask_idx]] = self.cmap[mask_idx, :3]
             # reference_mask3[masks3[mask_idx]] = self.cmap[mask_idx, :3]
 
-
-        plt.imshow(reference_mask); plt.savefig("/code/debug/ref_mask.png")
-        # plt.imshow(reference_mask2); plt.savefig("/code/debug/ref_mask2.png")
-        # plt.imshow(reference_mask3); plt.savefig("/code/debug/ref_mask3.png")
-        plt.imshow(scene_depth); plt.savefig("/code/debug/ref_depth.png")
-        # plt.imshow(plane_depth); plt.savefig("/code/debug/ref_plane_depth.png")
+        if self.debug_flag:
+            plt.imshow(reference_mask); plt.savefig("/code/debug/ref_mask.png")
+            # plt.imshow(reference_mask2); plt.savefig("/code/debug/ref_mask2.png")
+            # plt.imshow(reference_mask3); plt.savefig("/code/debug/ref_mask3.png")
+            plt.imshow(scene_depth); plt.savefig("/code/debug/ref_depth.png")
+            # plt.imshow(plane_depth); plt.savefig("/code/debug/ref_plane_depth.png")
 
         # Set up optimization =================================================
         # create scene geometry from known meshes
@@ -254,7 +255,7 @@ class VerifyPose:
 
         # Perform optimization ================================================
         best_metrics, iter_values = object_pose.optimization_step(
-            self.model, rgb, scene_depth, masks, T_init_list, None, self.cfg.optim,
+            self.model, rgb, scene_depth, masks, T_init_list, self.cfg.optim, None,
             #self.optimizer_name, self.max_num_iterations, self.early_stopping_loss, self.lr,
             logger, im_id, self.debug_flag, f"debug/{scene_name}/loss_num_{1}/{self.cfg.optim.optimizer_name}/{self.cfg.optim.learning_rate}",
             isbop=False)

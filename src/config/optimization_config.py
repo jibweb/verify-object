@@ -10,14 +10,15 @@ from enum import Enum
 class LossConfig(BaseConfig):
     active : bool = True
     early_stopping_loss : float = 1.
+    weight : float = 1.
 
 
 @dataclass
 class LossesConfig(BaseConfig):
     silhouette_loss : LossConfig = field(
-        default_factory=lambda: LossConfig(active=True, early_stopping_loss=0.3))
+        default_factory=lambda: LossConfig(active=True, early_stopping_loss=0.2))
     collision_loss : LossConfig = field(
-        default_factory=lambda: LossConfig(active=True, early_stopping_loss=0.05))
+        default_factory=lambda: LossConfig(active=True, early_stopping_loss=0.03))
     contour_loss : LossConfig = field(
         default_factory=lambda: LossConfig(active=False, early_stopping_loss=0.7))
     depth_loss : LossConfig = field(
@@ -27,6 +28,6 @@ class LossesConfig(BaseConfig):
 class OptimizationConfig(BaseConfig):
     learning_rate: float = 0.015
     optimizer_name: str = 'adam'
-    max_iter: int = 200
+    max_iter: int = 50
     pose_representation : str = 'q'  # choices=['so3', 'se3', 'q'], help='q for [q, t], so3 for [so3_log(R), t] or se3 for se3_log([R, t])'
     losses : LossesConfig = field(default_factory=LossesConfig)

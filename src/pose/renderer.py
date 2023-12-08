@@ -101,7 +101,6 @@ class Renderer(nn.Module):
         self.image_ref = None  # Image mask reference
 
     def init(self, T_init_list, T_plane=None): # TODO : Did I do it correctly here?
-        print("init", T_init_list)
         # self.image_ref = torch.from_numpy(image_ref.astype(np.float32)).to(device)
         if self.representation == 'se3':
             self.log_list = nn.Parameter(torch.stack([(se3_log_map(T_init)) for T_init in T_init_list]))
@@ -159,7 +158,6 @@ class Renderer(nn.Module):
             meshes_transformed = []
             meshes_faces_num = [0]
             for mesh, mesh_r, mesh_t in zip(self.meshes, R, t):
-                print("in renderer", mesh_r, mesh_t)
                 new_verts_padded = \
                     ((mesh_r @ mesh.verts_padded()[..., None]) + mesh_t[..., None])[..., 0]
                 mesh = mesh.update_padded(new_verts_padded)
