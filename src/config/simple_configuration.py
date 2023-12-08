@@ -18,7 +18,6 @@ def _set_value_recursively(obj, name: Union[list, str], val: Any):
 
 class BaseConfig:
     def __init__(self) -> None:
-        print("Called before dataclass")
         pass
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -42,12 +41,28 @@ class BaseConfig:
 
         return type(value) == self.__annotations__[name]
 
-
-    def from_dict(self, new_values: dict, flat: bool=False):
+    def from_dict(self, new_values: dict, flat: bool=False, sep='.'):
         for name, new_val in new_values.items():
             if flat:
-                split_name = name.split(".")
+                split_name = name.split(sep)
                 _set_value_recursively(self, split_name, new_val)
+            else:
+                _set_value_recursively(self, name, new_val)
+
+    def to_dict(self, flat: bool = False, sep : str = '.') -> dict:
+        dict_repr = {}
+        for key, val in self.__dict__.items():
+            if isinstance(val, BaseConfig):
+                subdict = val.to_dict(flat=flat, sep=sep)
+                if flat:
+                    for subkey, subval in subdict.items():
+                        dict_repr[sep.join([key, subkey])] = subval
+                else:
+                    dict_repr[key] = subdict
+            else:
+                dict_repr[key] = val
+
+        return dict_repr
 
 
 # def configuration(_cls=None, *, init=True, repr=True, eq=True, order=False,
