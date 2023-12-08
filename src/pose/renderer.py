@@ -101,15 +101,16 @@ class Renderer(nn.Module):
         self.image_ref = None  # Image mask reference
 
     def init(self, T_init_list, T_plane=None): # TODO : Did I do it correctly here?
+        print("init", T_init_list)
         # self.image_ref = torch.from_numpy(image_ref.astype(np.float32)).to(device)
         if self.representation == 'se3':
             self.log_list = nn.Parameter(torch.stack([(se3_log_map(T_init)) for T_init in T_init_list]))
         elif self.representation == 'so3':
             self.r_list = nn.Parameter(torch.stack([(so3_log_map(T_init[:, :3, :3])) for T_init in T_init_list]))
-            self.t_list = nn.Parameter(torch.stack([(T_init[:, 3, :3]) for T_init in T_init_list]))
+            self.t_list = nn.Parameter(torch.stack([(T_init[:, :3, 3]) for T_init in T_init_list]))
         elif self.representation == 'q':  # [q, t] representation
             self.q_list = nn.Parameter(torch.stack([(matrix_to_quaternion(T_init[:, :3, :3])) for T_init in T_init_list]))
-            self.t_list = nn.Parameter(torch.stack([(T_init[:, 3, :3]) for T_init in T_init_list]))
+            self.t_list = nn.Parameter(torch.stack([(T_init[:, :3, 3]) for T_init in T_init_list]))
         # elif self.representation == 'in-plane': # TODO: Check for in-plane how should this change ?
         #     # in this representation, we only update two delta values
         #     # - rz = in-plane z rotation, txy = in-plane xy translation
@@ -124,7 +125,7 @@ class Renderer(nn.Module):
         if self.representation == 'se3': #TODO: adapt this
             self.log_list
             T = se3_exp_map(self.log)
-            return T[:, :3, :3], T[:, 3, :3]
+            return T[:, :3, :3], T[:, :3, 3]
         elif self.representation == 'so3': #TODO: adapt this
             return so3_exp_map(self.r), self.t
         elif self.representation == 'q': #TODO: Is this correct?
@@ -136,7 +137,7 @@ class Renderer(nn.Module):
             T[:, :3, :3] = euler_angles_to_matrix(eulers, "XYZ")
             T[:, 3, :2] += self.txy
             T = T @ self.T_plane
-            return T[:, :3, :3], T[:, 3, :3]
+            return T[:, :3, :3], T[:, :3, 3]
 
     def get_transform(self): # TODO: Is it correct?
         T_list = []
@@ -144,7 +145,7 @@ class Renderer(nn.Module):
         for i in range(len(r_list)):
             T = torch.eye(4, device=device)[None, ...]
             T[:, :3, :3] = r_list[i]
-            T[:, 3, :3] = t_list[i]
+            T[:, :3, 3] = t_list[i]
             T_list.append(T)
         return T_list
 
@@ -157,7 +158,8 @@ class Renderer(nn.Module):
         if as_scene:  # 1 image
             meshes_transformed = []
             meshes_faces_num = [0]
-            for mesh, mesh_r, mesh_t in zip(self.meshes, R.transpose(-2, -1), t):
+            for mesh, mesh_r, mesh_t in zip(self.meshes, R, t):
+                print("in renderer", mesh_r, mesh_t)
                 new_verts_padded = \
                     ((mesh_r @ mesh.verts_padded()[..., None]) + mesh_t[..., None])[..., 0]
                 mesh = mesh.update_padded(new_verts_padded)

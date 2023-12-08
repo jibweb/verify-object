@@ -39,7 +39,7 @@ class OptimizationModel(nn.Module):
         # self.image_ref = torch.from_numpy(image_ref.astype(np.float32)).to(device)
         self.renderer.init(T_init_list)
 
-    def signed_dis(self, isbop=False,k=10):
+    def signed_dis(self, k=10):
         """
         Calculating the signed distance of an object and the plane (The table)
         :return: two torch arrays with the length of number of points, showing the distance of that point and whether it
@@ -164,16 +164,16 @@ class OptimizationModel(nn.Module):
     def get_R_t(self):
         return self.renderer.get_R_t()
 
-    def forward(self, ref_rgb, ref_depth, ref_masks, image_name_debug, debug_flag, isbop):
+    def forward(self, ref_rgb, ref_depth, ref_masks, debug_flag):
         print("MODEL", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
         # Render the silhouette using the estimated pose
-        image_est, image_depth_est, obj_masks, fragments_est = self.renderer()
+        image_est, depth_est, obj_masks, fragments_est = self.renderer()
 
         loss = torch.zeros(1).to(device)
         contour_loss = None
         print("MODEL", 2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
-        # Silhouette loss
+        # Silhouette loss -----------------------------------------------------
         if self.cfg.losses.silhouette_loss.active:
             diff_rend_loss = torch.zeros(len(ref_masks)).to(device)
             for mask_idx, ref_mask in enumerate(ref_masks):
@@ -186,8 +186,9 @@ class OptimizationModel(nn.Module):
                     (image_unique_mask - ref_mask)**2
                 ) / torch.sum(union) # Corresponds to 1 - IoU
 
-                out_np = K.utils.tensor_to_image((image_unique_mask - ref_mask)**2)
-                plt.imshow(out_np); plt.savefig("/code/debug/mask-{}.png".format(mask_idx))
+                if debug_flag:
+                    out_np = K.utils.tensor_to_image((image_unique_mask - ref_mask)**2)
+                    plt.imshow(out_np); plt.savefig("/code/debug/mask-{}.png".format(mask_idx))
 
             diff_rend_loss = torch.sum(diff_rend_loss)
             loss += diff_rend_loss
@@ -197,42 +198,33 @@ class OptimizationModel(nn.Module):
 
         print("MODEL", 3, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
-        # ref_depth_tensor = torch.from_numpy(
-        #     ref_depth.astype(np.float32)).to(device)
-        # # ref_depth_tensor *= (self.image_ref[..., 0] > 0).float()
-        # # d_depth = (ref_depth_tensor - image_depth_est)
+        # Depth loss ----------------------------------------------------------
+        if self.cfg.losses.depth_loss.active:
+            ref_depth_tensor = torch.from_numpy(
+                ref_depth.astype(np.float32)).to(device)
+            # ref_depth_tensor *= (self.image_ref[..., 0] > 0).float()
+            # d_depth = (ref_depth_tensor - depth_est)
 
-        # depth = torch.gather(zbuf, 0, depth_indices[..., None])
-        # d_depth = (depth - ref_depth_tensor[None, ..., None])[depth > 0]
+            # depth = torch.gather(zbuf, 0, depth_indices[..., None])
+            d_depth = (depth_est - ref_depth_tensor[None, ..., None])[depth_est > 0]
 
-        # # depth_loss = torch.sum(d_depth**2) / torch.sum((zbuf > -1).float())
-        # depth_loss = torch.sum(d_depth**2) / (d_depth.shape[0])
-        depth_loss = 0
-        # print("Depth", image_depth_est.min(), image_depth_est.max(), ref_depth_tensor.min(), ref_depth_tensor.max())
+            # depth_loss = torch.sum(d_depth**2) / torch.sum((zbuf > -1).float())
+            depth_loss = torch.sum(d_depth**2) / (d_depth.shape[0])
+        else:
+            depth_loss = None
 
-        out_np = K.utils.tensor_to_image(image_depth_est)
-        plt.imshow(out_np); plt.savefig("/code/debug/depth_est.png")
-        # out_np = K.utils.tensor_to_image(d_depth**2)
-        # plt.imshow(out_np); plt.savefig("/code/src/depth.png")
+        if debug_flag:
+            out_np = K.utils.tensor_to_image(depth_est)
+            plt.imshow(out_np); plt.savefig("/code/debug/depth_est.png")
 
-        # if self.loss_func_num == 0:
-        #     loss = torch.sum(torch.sum(d ** 2))
-        # elif self.loss_func_num == 1:
-
-        # Collision loss
+        # Collision loss ------------------------------------------------------
         if self.cfg.losses.collision_loss.active:
             # Calculating the signed distance
-            signed_dis, intersect_point = self.signed_dis(isbop=isbop)
+            signed_dis, intersect_point = self.signed_dis()
             signed_dis_loss = torch.max(signed_dis)
             loss += torch.max(signed_dis_loss)
         else:
             signed_dis_loss = None
-            # diff_rend_loss = torch.sum(torch.sum(d ** 2))
-            # loss= torch.sum(torch.sum(d ** 2)) + torch.max(signed_dis) #torch.sum(intersect_point)
-            # diff_rend_loss = torch.sum(diff_rend_loss)
-            # loss= torch.sum(diff_rend_loss) + torch.max(signed_dis) #torch.sum(intersect_point)
-        # else:
-        #     raise ValueError()
 
         return loss, image_est, None, diff_rend_loss, signed_dis_loss, contour_loss, depth_loss # signed_dis
 

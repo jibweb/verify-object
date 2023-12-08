@@ -41,7 +41,6 @@ PROJECT_TO_INTERNAL_NAMES = {
 class VerifyPose:
 
     def __init__(self, name, cfg, debug_flag=False, intrinsics_from_file=False):
-
         self.debug_flag = debug_flag
 
         # Reading camera intrinsics
@@ -59,38 +58,16 @@ class VerifyPose:
             self.camera_info = rospy.wait_for_message(self.camera_info_topic, CameraInfo)
             rospy.loginfo(f"[{name}] Camera info received")
 
-
         self.viz_pub = rospy.Publisher(f"/{name}/debug_visualization", Image, queue_size=10, latch=True)
 
         self.plane_model = None
 
-
-        # TODO: set from rosparam:
-        mesh_num_samples = 500
-        # representation = 'q' # choices=['so3', 'se3', 'q'], help='q for [q, t], so3 for [so3_log(R), t] or se3 for se3_log([R, t])'
-        # objects_path = cfg.objects_path
-        # self.mask_path = os.path.join(config.PATH_DATASET_TRACEBOT, 'scenes')
         self.scale = self.camera_info.width // 640
         self.intrinsics = np.array(self.camera_info.K).reshape(3,3)
         self.intrinsics[:2, :] //= self.scale
 
-
+        # TODO: set from rosparam:
         self.cfg = cfg
-        # self.lr = cfg.optim.learning_rate
-        self.loss_num = 1
-        # # loss_number_list = [
-        # #     # 0,
-        # #     # 1,
-        # #     # 2,
-        # #     # 3,
-        # #     # 4,
-        # #     # 5,
-        # #     6,
-        # # ]
-        # self.optimizer_name = cfg.optim.optimizer_name
-
-        # self.max_num_iterations = cfg.optim.max_iter
-        # self.early_stopping_loss = cfg.optim.early_stopping_loss #0.5 #350 #TODO adapt to scene automatically
 
         # load all meshes that will be needed
         self.cmap = plt.cm.tab20(range(20)) # 20 different colors, two consecutive ones are similar (for two instances)
@@ -107,7 +84,6 @@ class VerifyPose:
             self.intrinsics,
             self.camera_info.width // self.scale, self.camera_info.height // self.scale,
             cfg.optim,
-            # representation=cfg.optim.pose_representation,
             image_scale=self.scale).to(device)
 
         # create server
@@ -162,7 +138,7 @@ class VerifyPose:
 
         t_mag = 1
         scene_name = "ros_test_scene"
-        logger = Logger(log_dir=os.path.join(config.PATH_REPO, f"logs/{scene_name}/loss_num_{self.loss_num}/{self.cfg.optim.optimizer_name}"),
+        logger = Logger(log_dir=os.path.join(config.PATH_REPO, f"logs/{scene_name}/loss_num_{1}/{self.cfg.optim.optimizer_name}"),
                                     log_name=f"{scene_name}_opt_{self.cfg.optim.optimizer_name}_lr_{self.cfg.optim.learning_rate}",
                                     reset_num_timesteps=True)
 
@@ -280,14 +256,14 @@ class VerifyPose:
         best_metrics, iter_values = object_pose.optimization_step(
             self.model, rgb, scene_depth, masks, T_init_list, None, self.cfg.optim,
             #self.optimizer_name, self.max_num_iterations, self.early_stopping_loss, self.lr,
-            logger, im_id, self.debug_flag, f"debug/{scene_name}/loss_num_{self.loss_num}/{self.cfg.optim.optimizer_name}/{self.cfg.optim.learning_rate}",
+            logger, im_id, self.debug_flag, f"debug/{scene_name}/loss_num_{1}/{self.cfg.optim.optimizer_name}/{self.cfg.optim.learning_rate}",
             isbop=False)
 
         best_R_list, best_t_list = self.model.get_R_t()
         predicted_poses = []
         for best_R, best_t in zip(best_R_list, best_t_list):
             pose = np.eye(4)
-            pose[:3, :3] = best_R.to('cpu').detach().numpy()[0].T
+            pose[:3, :3] = best_R.to('cpu').detach().numpy()[0]
             pose[:3, 3] = best_t.to('cpu').detach().numpy()[0]
             predicted_poses.append(pose)
 

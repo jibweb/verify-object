@@ -239,8 +239,8 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
 
 
     # Initializate model
-    T_init_list_transposed = [T_init.transpose(-2, -1) for T_init in T_init_list]
-    model.init(None, T_init_list_transposed)  # note: pytorch3d uses [[R,0], [t, 1]] format (-> transposed)
+    # T_init_list_transposed = [T_init.transpose(-2, -1) for T_init in T_init_list]
+    model.init(None, T_init_list)  # note: pytorch3d uses [[R,0], [t, 1]] format (-> transposed)
 
     if T_igt_list:
         metrics, metrics_str = model.evaluate_progress(
@@ -284,8 +284,6 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
 
 
     for i in tqdm(range(optim_cfg.max_iter)):
-
-
         print("OPTIM_STEP", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         optimizer.zero_grad()
@@ -294,9 +292,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
             reference_rgb,
             reference_depth,
             reference_masks_tensors,
-            f"{img_debug_name}/{im_id}/{i}.png",
-            debug_flag,
-            isbop)  # Calling forward function
+            debug_flag)  # Calling forward function
 
         loss.backward()
         optimizer.step()
