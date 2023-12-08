@@ -1,6 +1,7 @@
 import argparse
 import numpy as np
 import os
+import sys
 import torch
 import yaml
 from pose.model import OptimizationModel
@@ -71,16 +72,16 @@ class VerifyPose:
 
         # load all meshes that will be needed
         self.cmap = plt.cm.tab20(range(20)) # 20 different colors, two consecutive ones are similar (for two instances)
-        self.meshes, self.sampled_down_meshes = object_pose.load_objects_models(
-            SUPPORTED_OBJECTS, cfg.objects_path,
-            cmap=self.cmap, mesh_num_samples=cfg.mesh_num_samples)
-
-        # Renderer
-
+        meshes, sampled_down_meshes = object_pose.load_objects_models(
+            SUPPORTED_OBJECTS,
+            cfg.objects_path,
+            cmap=self.cmap,
+            mesh_num_samples=cfg.mesh_num_samples)
 
         # Optimization model
         self.model = OptimizationModel(
-            None,
+            meshes,
+            sampled_down_meshes,
             self.intrinsics,
             self.camera_info.width // self.scale, self.camera_info.height // self.scale,
             cfg.optim,
@@ -107,8 +108,8 @@ class VerifyPose:
         ]
 
     def callback(self, goal):
-
         print(1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
+
         # Parse goal message ==================================================
         scene_objects = [PROJECT_TO_INTERNAL_NAMES[scene_obj]
             for scene_obj in goal.object_types]
@@ -164,7 +165,7 @@ class VerifyPose:
                 reference_width, reference_height,
                 to_meters=1e-3,
                 distance_threshold=0.01)
-            T, plane, scene, cloud, indices = plane_det.detect(
+            plane_T, plane, scene, cloud, indices = plane_det.detect(
                 rgb, depth, intrinsics, max_dist=1.0)
 
             # Create the filtered scene depth image
@@ -194,7 +195,7 @@ class VerifyPose:
 
         self.publish_viz(rgb, scene_objects, bounding_boxes, init_poses, [0.5 for _ in scene_objects], intrinsics)
 
-        #TODO order detections
+        #TODO order detections (and cut out part of bounding box occluded by front detection)
         #TODO filter supported objects?
         #TODO filter out detections where the silhouette doesn't overlap with the detection
 
@@ -224,33 +225,15 @@ class VerifyPose:
             # plt.imshow(plane_depth); plt.savefig("/code/debug/ref_plane_depth.png")
 
         # Set up optimization =================================================
-        # create scene geometry from known meshes
-        object_names, object_counts = np.unique(scene_objects, return_counts=True)
-
-        assert object_counts.max() <= 3  # only 2 instances atm
-        counter = dict(zip(object_names, [0]*len(object_names)))
-        scene_meshes = []
-        scene_sampled_mesh = []
-        scene_obj_names = [] # For storing the name of the objects
-        for object_name in scene_objects:
-            i = counter[object_name]
-            counter[object_name] += 1
-            mesh = self.meshes[f'{object_name}-{i}']
-            scene_meshes.append(mesh)
-            scene_sampled_mesh.append(self.sampled_down_meshes[f'{object_name}-{i}'])
-            scene_obj_names.append(object_name)
-
-        # Adding the properties to the model
-        self.model.renderer.meshes = scene_meshes
-        self.model.sampled_meshes = scene_sampled_mesh
-        self.model.renderer.meshes_name = scene_obj_names
-
-        self.model.plane_T_matrix = torch.from_numpy(T).type(torch.FloatTensor).to(device)
         self.model.plane_pcd = plane
-
-
         T_init_list = [torch.from_numpy(pose[None, ...]).to(device)
                      for pose in init_poses]
+
+        self.model.init(
+            scene_objects,
+            T_init_list,
+            T_plane=torch.from_numpy(plane_T.astype(np.float32)))
+
         print(2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         # Perform optimization ================================================

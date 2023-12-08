@@ -26,12 +26,10 @@ class Renderer(nn.Module):
     def __init__(self, meshes, intrinsics, width, height, representation='q'):
         super().__init__()
         self.meshes = meshes
-        self.meshes_name = None
-        self.sampled_meshes = None
         self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
         self.camera_ins = None
 
-        self.meshes_diameter = None
+        # self.meshes_diameter = None
 
         # Plane (Table in this dataset) point clouds and transformation matrix
         self.plane_pcd = None
@@ -100,8 +98,12 @@ class Renderer(nn.Module):
             self.scale_rotation = 10  # bigger impact of rotation st it's not dominated by translation
         self.image_ref = None  # Image mask reference
 
-    def init(self, T_init_list, T_plane=None): # TODO : Did I do it correctly here?
-        # self.image_ref = torch.from_numpy(image_ref.astype(np.float32)).to(device)
+    def init(self, scene_objects, T_init_list): # TODO : Did I do it correctly here?
+        self.scene_meshes = [
+            self.meshes[object_name].clone().to(device)
+            for object_name in scene_objects
+        ]
+
         if self.representation == 'se3':
             self.log_list = nn.Parameter(torch.stack([(se3_log_map(T_init)) for T_init in T_init_list]))
         elif self.representation == 'so3':
@@ -157,7 +159,7 @@ class Renderer(nn.Module):
         if as_scene:  # 1 image
             meshes_transformed = []
             meshes_faces_num = [0]
-            for mesh, mesh_r, mesh_t in zip(self.meshes, R, t):
+            for mesh, mesh_r, mesh_t in zip(self.scene_meshes, R, t):
                 new_verts_padded = \
                     ((mesh_r @ mesh.verts_padded()[..., None]) + mesh_t[..., None])[..., 0]
                 mesh = mesh.update_padded(new_verts_padded)

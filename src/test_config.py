@@ -64,6 +64,7 @@ if __name__ == "__main__":
     cfg.from_dict(flat_dict_repr, flat=True, sep='-')
     print(cfg.optim.learning_rate, "should be 0.05")
 
+    pprint.pprint(cfg.to_dict(flat=True, sep='/'))
 
     # Instantiate the parser
     parser = argparse.ArgumentParser(description='Optional app description')

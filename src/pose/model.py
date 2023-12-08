@@ -16,28 +16,36 @@ import matplotlib.pyplot as plt
 import kornia as K
 
 class OptimizationModel(nn.Module):
-    def __init__(self, meshes, intrinsics, width, height, cfg, image_scale=1, BOP=False):
+    def __init__(self, meshes, sampled_meshes, intrinsics, width, height, cfg, image_scale=1, BOP=False):
         super().__init__()
         self.meshes = meshes
-        self.meshes_name = None
-        self.sampled_meshes = None
+        self.sampled_meshes = sampled_meshes
         self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
         self.cfg = cfg
 
         self.meshes_diameter = None
 
         # Plane (Table in this dataset) point clouds and transformation matrix
-        self.plane_pcd = None
-        self.plane_T_matrix = None
+        # self.plane_pcd = None
+        # self.plane_T_matrix = None
 
         # Set up renderer
         self.renderer = Renderer(meshes, intrinsics, width, height, representation=cfg.pose_representation)
 
-        self.image_ref = None  # Image mask reference
+        # self.image_ref = None  # Image mask reference
 
-    def init(self, image_ref, T_init_list, T_plane=None): # TODO : Did I do it correctly here?
-        # self.image_ref = torch.from_numpy(image_ref.astype(np.float32)).to(device)
-        self.renderer.init(T_init_list)
+    def init(self, scene_objects, T_init_list, T_plane=None):
+        # Init for rendering
+        self.renderer.init(scene_objects, T_init_list)
+
+        # Init for collision
+        self.scene_sampled_meshes = [
+            self.sampled_meshes[object_name].clone().to(device)
+            for object_name in scene_objects
+        ]
+
+        if T_plane is not None:
+            self.plane_T_matrix = T_plane.to(device)
 
     def signed_dis(self, k=10):
         """
@@ -45,7 +53,8 @@ class OptimizationModel(nn.Module):
         :return: two torch arrays with the length of number of points, showing the distance of that point and whether it
         is an intersection point or not
         """
-        points = torch.cat([torch.tensor(self.sampled_meshes[i][None, ...], dtype=torch.float ,device=device) for i in range(len(self.sampled_meshes))],dim=0)# shape (num of meshes, num point in each obj , 6 (coordinates and norms))
+        # points = torch.cat([torch.tensor(self.sampled_meshes[i][None, ...], dtype=torch.float ,device=device) for i in range(len(self.sampled_meshes))],dim=0)# shape (num of meshes, num point in each obj , 6 (coordinates and norms))
+        points = torch.cat(self.scene_sampled_meshes, dim=0)# shape (num of meshes, num point in each obj , 6 (coordinates and norms))
         estimated_trans_matrixes = torch.cat([T for T in self.renderer.get_transform()], dim=0) # Transposed because of the o3d and pytorch difference
 
         TOL_CONTACT = 0.01
@@ -73,7 +82,7 @@ class OptimizationModel(nn.Module):
 
 
         # others_indices = [[1], [0]] # TODO : correct? Change it from hard code
-        others_indices = [list(range(len(self.sampled_meshes))) for i in range(len(self.sampled_meshes))]
+        others_indices = [list(range(len(self.scene_sampled_meshes))) for i in range(len(self.scene_sampled_meshes))]
         [others_indices[i].remove(i) for i in range(len(others_indices))]
 
         if len(others_indices) > 0:  # === 3) get signed distance to other objects in the scene
@@ -168,13 +177,13 @@ class OptimizationModel(nn.Module):
         return self.renderer.get_R_t()
 
     def forward(self, ref_rgb, ref_depth, ref_masks, debug_flag):
-        print("MODEL", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
+        # print("MODEL", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
         # Render the silhouette using the estimated pose
         image_est, depth_est, obj_masks, fragments_est = self.renderer()
 
         loss = torch.zeros(1).to(device)
         losses_values = {}
-        print("MODEL", 2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
+        # print("MODEL", 2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         # Silhouette loss -----------------------------------------------------
         if self.cfg.losses.silhouette_loss.active:
@@ -228,7 +237,7 @@ class OptimizationModel(nn.Module):
             out_np = K.utils.tensor_to_image(depth_est)
             plt.imshow(out_np); plt.savefig("/code/debug/depth_est.png")
 
-        print("MODEL", 3, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
+        # print("MODEL", 3, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         return loss, image_est, losses_values
 

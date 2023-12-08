@@ -135,8 +135,21 @@ def load_objects_models(object_names, objects_path, cmap=plt.cm.tab20(range(20))
     sampled_down_meshes = {}
 
     for oi, object_name in enumerate(object_names):
+        # Load mesh
         verts, faces_idx, _ = load_obj(os.path.join(objects_path, f'{object_name}/{object_name}_simple.obj'))
+        textures = TexturesVertex(
+            verts_features=torch.from_numpy(cmap[oi][:3])[None, None, :]
+                                    .expand(-1, verts.shape[0], -1).type_as(verts)
+        )
+        mesh = Meshes(
+            verts=[verts],
+            faces=[faces_idx.verts_idx],
+            textures=textures
+        )
 
+        meshes[object_name] = mesh
+
+        # Create a randomly point-normal set
         # Same number of points for each individual object
         mesh_sampled_down = trimesh.load(os.path.join(objects_path, f'{object_name}/{object_name}_simple.obj'))
         norms = mesh_sampled_down.face_normals
@@ -147,18 +160,7 @@ def load_objects_models(object_names, objects_path, cmap=plt.cm.tab20(range(20))
             idx = np.random.choice(samples_point_norm.shape[0], mesh_num_samples - samples_point_norm.shape[0])
             samples_point_norm = np.concatenate((samples_point_norm, samples_point_norm[idx]), axis=0)
 
-        for ii in range(2):  # two instances per object with different color
-            textures = TexturesVertex(verts_features=torch.from_numpy(np.array(cmap[oi*2+ii][:3]))[None, None, :]
-                                    .expand(-1, verts.shape[0], -1).type_as(verts).to(device)
-            )
-            # print(cmap[oi*2+ii][:3])
-            mesh = Meshes(
-                verts=[verts.to(device)],
-                faces=[faces_idx.verts_idx.to(device)],
-                textures=textures
-            )
-            meshes[f'{object_name}-{ii}'] = mesh
-            sampled_down_meshes[f'{object_name}-{ii}'] = samples_point_norm
+        sampled_down_meshes[object_name] = torch.from_numpy(samples_point_norm.astype(np.float32))[None, ...]
 
     return meshes, sampled_down_meshes
 
@@ -241,7 +243,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
 
     # Initializate model
     # T_init_list_transposed = [T_init.transpose(-2, -1) for T_init in T_init_list]
-    model.init(None, T_init_list)  # note: pytorch3d uses [[R,0], [t, 1]] format (-> transposed)
+    # model.init(None, T_init_list)  # note: pytorch3d uses [[R,0], [t, 1]] format (-> transposed)
 
     if T_igt_list:
         metrics, metrics_str = model.evaluate_progress(
@@ -282,9 +284,10 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         torch.from_numpy(mask.astype(np.float32)).to(device)
         for mask in reference_masks]
 
+    print("OPTIM_STEP", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
-    for i in tqdm(range(optim_cfg.max_iter)):
-        print("OPTIM_STEP", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
+    pbar = tqdm(range(optim_cfg.max_iter))
+    for i in pbar:
 
         optimizer.zero_grad()
 
@@ -300,7 +303,8 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         if debug_flag:
             out_np = K.utils.tensor_to_image(torch.movedim(image[..., :3], 3, 1))
             plt.imshow(out_np); plt.savefig("/code/debug/optim{:05d}.png".format(i))
-        print("LOSSES:", " | ".join([f"{name}: {loss_val:.3f}" for name, loss_val in losses_values.items()]))
+
+        pbar.set_description("LOSSES: {}".format(" | ".join([f"{name}: {loss_val:.3f}" for name, loss_val in losses_values.items()])))
 
         # early stopping
         if loss.item() < scene_early_stopping_loss:
