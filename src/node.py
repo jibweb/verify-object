@@ -108,8 +108,6 @@ class VerifyPose:
         ]
 
     def callback(self, goal):
-        print(1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
-
         # Parse goal message ==================================================
         scene_objects = [PROJECT_TO_INTERNAL_NAMES[scene_obj]
             for scene_obj in goal.object_types]
@@ -200,29 +198,19 @@ class VerifyPose:
         #TODO filter out detections where the silhouette doesn't overlap with the detection
 
         # Prepare target silhouettes ==========================================
-        masks = self.create_masks_from_bounding_boxes(bounding_boxes, reference_height, reference_width)
-        # masks2 = self.refine_masks_with_scene_depth(masks, scene_depth)
-        # masks3 = [
-        #     np.logical_and(mask.astype(bool), plane_depth == 0)
-        #     for mask in masks
-        # ]
-
+        if len(goal.object_masks) == 0:
+            masks = self.create_masks_from_bounding_boxes(bounding_boxes, reference_height, reference_width)
+        else:
+            masks = [ros_numpy.numpify(mask) for mask in goal.object_masks]
 
         # Create colored instance mask
         reference_mask = np.zeros((reference_height, reference_width, 3))
-        # reference_mask2 = np.zeros((reference_height, reference_width, 3))
-        # reference_mask3 = np.zeros((reference_height, reference_width, 3))
         for mask_idx, mask in enumerate(masks):
             reference_mask[mask] = self.cmap[mask_idx, :3]
-            # reference_mask2[masks2[mask_idx]] = self.cmap[mask_idx, :3]
-            # reference_mask3[masks3[mask_idx]] = self.cmap[mask_idx, :3]
 
         if self.debug_flag:
             plt.imshow(reference_mask); plt.savefig("/code/debug/ref_mask.png")
-            # plt.imshow(reference_mask2); plt.savefig("/code/debug/ref_mask2.png")
-            # plt.imshow(reference_mask3); plt.savefig("/code/debug/ref_mask3.png")
             plt.imshow(scene_depth); plt.savefig("/code/debug/ref_depth.png")
-            # plt.imshow(plane_depth); plt.savefig("/code/debug/ref_plane_depth.png")
 
         # Set up optimization =================================================
         self.model.plane_pcd = plane
@@ -234,9 +222,9 @@ class VerifyPose:
             T_init_list,
             T_plane=torch.from_numpy(plane_T.astype(np.float32)))
 
-        print(2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
-
         # Check initial detections ============================================
+        # TODO: make this step conditional, whether the object is in hand or on plane
+        # use plane model and mesh instead of depth
         image_est, depth_est, obj_masks, fragments_est = self.model.renderer()
         for mask_idx, mask in enumerate(obj_masks):
             diff_z = det_mean_dist[mask_idx] - depth_est[mask].mean()
@@ -299,8 +287,6 @@ class VerifyPose:
             goal.bounding_boxes.append(bbox)
         result.object_types = scene_objects
         result.confidences = [1. for _ in scene_objects]
-
-        print("LAST", "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         self._server.set_succeeded(result)
 
