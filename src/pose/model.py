@@ -203,7 +203,7 @@ class OptimizationModel(nn.Module):
                     plt.imshow(out_np); plt.savefig("/code/debug/mask-{}.png".format(mask_idx))
 
             diff_rend_loss = torch.sum(diff_rend_loss)
-            loss += diff_rend_loss
+            loss += diff_rend_loss * self.cfg.losses.silhouette_loss.weight
             losses_values['silhouette'] = diff_rend_loss.item()
 
         # Collision loss ------------------------------------------------------
@@ -211,13 +211,13 @@ class OptimizationModel(nn.Module):
             # Calculating the signed distance
             signed_dis, intersect_point = self.signed_dis()
             signed_dis_loss = torch.max(signed_dis)
-            loss += signed_dis_loss
+            loss += signed_dis_loss * self.cfg.losses.collision_loss.weight
             losses_values['collision'] = signed_dis_loss.item()
 
         # Contour loss --------------------------------------------------------
         if self.cfg.losses.contour_loss.active:
             contour_loss = torch.zeros(1).to(device)
-            loss += contour_loss
+            loss += contour_loss * self.cfg.losses.contour_loss.weight
             losses_values['contour'] = contour_loss.item()
 
         # Depth loss ----------------------------------------------------------
@@ -231,6 +231,7 @@ class OptimizationModel(nn.Module):
 
             # depth_loss = torch.sum(d_depth**2) / torch.sum((zbuf > -1).float())
             depth_loss = torch.sum(d_depth**2) / (d_depth.shape[0])
+            loss += depth_loss * self.cfg.losses.depth_loss.weight
             losses_values['depth'] = depth_loss.item()
 
         if debug_flag:
