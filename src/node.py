@@ -59,7 +59,7 @@ class VerifyPose:
             self.camera_info = rospy.wait_for_message(self.camera_info_topic, CameraInfo)
             rospy.loginfo(f"[{name}] Camera info received")
 
-        self.viz_pub = rospy.Publisher(f"/{name}/debug_visualization", Image, queue_size=10, latch=True)
+        self.viz_pub = rospy.Publisher(f"{name}/debug_visualization", Image, queue_size=10, latch=True)
 
         self.plane_model = None
 
@@ -183,7 +183,7 @@ class VerifyPose:
             # print("Bboxes & depth", bbox, bbox_depth)
             perc_valid_depth_per_det.append(
                 np.mean(bbox_depth != 0))
-            det_mean_dist.append(np.mean(bbox_depth))
+            det_mean_dist.append(np.mean(bbox_depth[bbox_depth != 0]))
 
         valid_det_mask = np.array(perc_valid_depth_per_det) > 0.1
 
@@ -235,6 +235,18 @@ class VerifyPose:
             T_plane=torch.from_numpy(plane_T.astype(np.float32)))
 
         print(2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
+
+        # Check initial detections ============================================
+        image_est, depth_est, obj_masks, fragments_est = self.model.renderer()
+        for mask_idx, mask in enumerate(obj_masks):
+            diff_z = det_mean_dist[mask_idx] - depth_est[mask].mean()
+            T_init_list[mask_idx][0, 2, 3] += diff_z
+
+        # Re-init the model with the corrected poses
+        self.model.init(
+            scene_objects,
+            T_init_list,
+            T_plane=torch.from_numpy(plane_T.astype(np.float32)))
 
         # Perform optimization ================================================
         best_metrics, iter_values = object_pose.optimization_step(

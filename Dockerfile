@@ -27,8 +27,8 @@ RUN cd /opt \
 ENV PATH=/opt/conda/bin:$PATH
 
 # Create environment
-RUN conda create -n pytorch3d python=3.9 \
-    && conda install -n pytorch3d  pytorch=1.13.0 torchvision==0.14.0 pytorch-cuda=11.6 -c pytorch -c nvidia
+RUN conda create -n pytorch3d -y python=3.9 \
+    && conda install -n pytorch3d -y pytorch=1.13.0 torchvision==0.14.0 pytorch-cuda=11.6 -c pytorch -c nvidia
 # RUN conda create -n pytorch3d python=3.9 \
 #     && conda run -n pytorch3d pip install torch==1.13.0+cu116 torchvision==0.14.0+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
 RUN conda install -n pytorch3d -c fvcore -c iopath -c conda-forge fvcore iopath
