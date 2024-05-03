@@ -13,11 +13,11 @@ from pytorch3d.structures import Meshes
 import pytorch3d.structures as pyst
 from pytorch3d.renderer import TexturesVertex
 from pytorch3d.structures import Meshes, join_meshes_as_scene, join_meshes_as_batch
-from src.pose.model import OptimizationModel
+from pose.model import OptimizationModel
 import open3d as o3d
 # from src.pose.environment import scene_point_clouds
 # from src.pose.environment import scene_point_clouds
-import src.config as config
+import config
 import matplotlib as mpl
 from matplotlib import pyplot as plt
 

@@ -14,7 +14,7 @@ from pytorch3d.renderer import (
 from pytorch3d.renderer.mesh.renderer import MeshRendererWithFragments
 from pytorch3d.utils import cameras_from_opencv_projection
 from pytorch3d.structures import Meshes, join_meshes_as_scene, join_meshes_as_batch
-from src.collision import transformations as tra
+from collision import transformations as tra
 import numpy as np
 import open3d as o3d
 
@@ -177,7 +177,6 @@ class Renderer(nn.Module):
             image_depth_est, depth_indices = image_depth_est.min(-1)
             image_depth_est = torch.where(
                 image_depth_est != max_scene_depth, image_depth_est, 0.)
-
 
             pix_to_close_face = fragments_est.pix_to_face[..., 0]
             obj_masks = []

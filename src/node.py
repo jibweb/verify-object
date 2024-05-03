@@ -7,7 +7,7 @@ import yaml
 from pose.model import OptimizationModel
 import pose.object_pose as object_pose
 from collision.plane_detector import PlaneDetector
-from src.contour.contour import compute_sdf_image
+from contour.contour import compute_sdf_image
 from utility.logger import Logger
 from config import config
 from matplotlib import pyplot as plt
@@ -125,8 +125,8 @@ class VerifyPose:
         intrinsics = self.intrinsics.copy()
 
         if self.debug_flag:
-            cv2.imwrite("/code/debug/input_depth.png", depth)
-            cv2.imwrite("/code/debug/input_color.png", rgb)
+            cv2.imwrite("/data/debug/input_depth.png", depth)
+            cv2.imwrite("/data/debug/input_color.png", rgb)
 
         if self.scale != 1:
             rgb = cv2.resize(rgb, (rgb.shape[1] // self.scale, rgb.shape[0] // self.scale))
@@ -149,7 +149,7 @@ class VerifyPose:
 
         t_mag = 1
         scene_name = "ros_test_scene"
-        logger = Logger(log_dir=os.path.join(config.PATH_REPO, f"logs/{scene_name}/loss_num_{1}/{self.cfg.optim.optimizer_name}"),
+        logger = Logger(log_dir=os.path.join(cfg.path_repo, f"logs/{scene_name}/loss_num_{1}/{self.cfg.optim.optimizer_name}"),
                                     log_name=f"{scene_name}_opt_{self.cfg.optim.optimizer_name}_lr_{self.cfg.optim.learning_rate}",
                                     reset_num_timesteps=True)
 
@@ -220,8 +220,8 @@ class VerifyPose:
             reference_mask[mask] = self.cmap[mask_idx, :3]
 
         if self.debug_flag:
-            plt.imshow(reference_mask); plt.savefig("/code/debug/ref_mask.png")
-            plt.imshow(scene_depth); plt.savefig("/code/debug/ref_depth.png")
+            plt.imshow(reference_mask); plt.savefig("/data/debug/ref_mask.png")
+            plt.imshow(scene_depth); plt.savefig("/data/debug/ref_depth.png")
 
         # Set up optimization =================================================
         self.model.plane_pcd = plane

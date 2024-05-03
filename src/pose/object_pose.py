@@ -12,8 +12,8 @@ from scipy.spatial.transform.rotation import Rotation
 import imageio
 from PIL import Image
 # from src.contour.contour import single_image_edge, img_contour_sdf, imshow
-from src.contour.contour import compute_sdf_image
-from src.utility.visualization import visualization_progress
+from contour.contour import compute_sdf_image
+from utility.visualization import visualization_progress
 # from torchvision.transforms import GaussianBlur
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 import matplotlib.pyplot as plt
@@ -284,8 +284,6 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         torch.from_numpy(mask.astype(np.float32)).to(device)
         for mask in reference_masks]
 
-    print("OPTIM_STEP", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
-
     pbar = tqdm(range(optim_cfg.max_iter))
     for i in pbar:
 
@@ -302,7 +300,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
 
         if debug_flag:
             out_np = K.utils.tensor_to_image(torch.movedim(image[..., :3], 3, 1))
-            plt.imshow(out_np); plt.savefig("/code/debug/optim{:05d}.png".format(i))
+            plt.imshow(out_np); plt.savefig("/data/debug/optim{:05d}.png".format(i))
 
         pbar.set_description("LOSSES: {}".format(" | ".join([f"{name}: {loss_val:.3f}" for name, loss_val in losses_values.items()])))
 
@@ -347,7 +345,6 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
     # record end and synchronize
     end.record()
     torch.cuda.synchronize()
-    print("OPTIM_STEP", 2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
     # get time between events (in ms)
     print("______timing_________: ", start.elapsed_time(end))

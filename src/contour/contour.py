@@ -9,7 +9,7 @@ from torch import nn
 import torchvision
 import kornia as K
 import os
-import src.config as config
+import config
 from PIL import Image
 from torchvision.transforms import GaussianBlur
 import torch

@@ -6,25 +6,7 @@ from .optimization_config import OptimizationConfig
 from dataclasses import dataclass, field
 
 
-PATHS_DATASET_TRACEBOT = [
-    "/home/negar/Documents/Tracebot/Tracebot_Negar_2022_08_04",
-    "/media/dominik/FastData/datasets/Tracebot_Negar_2022_08_04",
-    "/home/jbweibel/dataset/Tracebot/Tracebot_Negar_2022_08_04"
-]
-try:
-    PATH_DATASET_TRACEBOT = [path for path in PATHS_DATASET_TRACEBOT if os.path.exists(path)][0]
-except IndexError:
-    print("Tracebot dataset not available !")
-
-PATHS_DATASET_BOP = [
-    "/home/negar/Documents/Tracebot/Files/BOP_datasets/tless_test_primesense_bop19/test_primesense",
-]
-try:
-    PATHS_DATASET_BOP = [path for path in PATHS_DATASET_BOP if os.path.exists(path)][0]
-except IndexError:
-    print("BOP dataset not available !")
-
-PATH_REPO = '/'.join(os.path.dirname(__file__).split('/')[:-1])
+PATH_DATASET_TRACEBOT = "/data/"
 
 
 @dataclass

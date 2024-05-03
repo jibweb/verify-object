@@ -5,10 +5,10 @@ import open3d as o3d
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
-from src.collision import transformations as tra
+from collision import transformations as tra
 import numpy as np
 import cv2 as cv
-from src.contour import contour
+from contour import contour
 from pose.renderer import Renderer
 
 
@@ -177,13 +177,11 @@ class OptimizationModel(nn.Module):
         return self.renderer.get_R_t()
 
     def forward(self, ref_rgb, ref_depth, ref_masks, debug_flag):
-        # print("MODEL", 1, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
         # Render the silhouette using the estimated pose
         image_est, depth_est, obj_masks, fragments_est = self.renderer()
 
         loss = torch.zeros(1).to(device)
         losses_values = {}
-        # print("MODEL", 2, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
         # Silhouette loss -----------------------------------------------------
         if self.cfg.losses.silhouette_loss.active:
@@ -192,7 +190,6 @@ class OptimizationModel(nn.Module):
                 image_unique_mask = torch.where(
                     obj_masks[mask_idx] > 0, image_est[..., 3], 0)
 
-
                 union = ((image_unique_mask + ref_mask) > 0).float()
                 diff_rend_loss[mask_idx] = torch.sum(
                     (image_unique_mask - ref_mask)**2
@@ -200,7 +197,7 @@ class OptimizationModel(nn.Module):
 
                 if debug_flag:
                     out_np = K.utils.tensor_to_image((image_unique_mask - ref_mask)**2)
-                    plt.imshow(out_np); plt.savefig("/code/debug/mask-{}.png".format(mask_idx))
+                    plt.imshow(out_np); plt.savefig("/data/debug/mask-{}.png".format(mask_idx))
 
             diff_rend_loss = torch.sum(diff_rend_loss)
             loss += diff_rend_loss * self.cfg.losses.silhouette_loss.weight
@@ -236,7 +233,7 @@ class OptimizationModel(nn.Module):
 
         if debug_flag:
             out_np = K.utils.tensor_to_image(depth_est)
-            plt.imshow(out_np); plt.savefig("/code/debug/depth_est.png")
+            plt.imshow(out_np); plt.savefig("/data/debug/depth_est.png")
 
         # print("MODEL", 3, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
 
