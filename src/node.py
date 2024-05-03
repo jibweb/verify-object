@@ -118,6 +118,10 @@ class VerifyPose:
             (bbox.x_offset, bbox.y_offset,
              bbox.x_offset + bbox.width, bbox.y_offset + bbox.height)
             for bbox in goal.bounding_boxes]
+        if len(goal.object_masks) != 0:
+            masks = [ros_numpy.numpify(mask).astype(bool)
+                     for mask in goal.object_masks]
+
         intrinsics = self.intrinsics.copy()
 
         if self.debug_flag:
@@ -131,6 +135,13 @@ class VerifyPose:
                 [bbox[i] // self.scale for i in range(4)]
                 for bbox in bounding_boxes
             ]
+
+            if len(goal.object_masks) != 0:
+                masks = [cv2.resize(
+                            mask.astype(np.float32),
+                            (mask.shape[1] // self.scale, mask.shape[0] // self.scale)
+                         ).astype(bool)
+                         for mask in masks]
 
             depth = cv2.resize(depth, (depth.shape[1] // self.scale, depth.shape[0] // self.scale)) # TODO: check size to see if scaling is necessary
 
@@ -199,9 +210,9 @@ class VerifyPose:
 
         # Prepare target silhouettes ==========================================
         if len(goal.object_masks) == 0:
-            masks = self.create_masks_from_bounding_boxes(bounding_boxes, reference_height, reference_width)
-        else:
-            masks = [ros_numpy.numpify(mask) for mask in goal.object_masks]
+            masks = self.create_masks_from_bounding_boxes(
+                bounding_boxes, reference_height, reference_width)
+
 
         # Create colored instance mask
         reference_mask = np.zeros((reference_height, reference_width, 3))
@@ -285,7 +296,8 @@ class VerifyPose:
             bbox.width = box[2] - box[0]
             bbox.height = box[3] - box[1]
             goal.bounding_boxes.append(bbox)
-        result.object_types = scene_objects
+        result.object_types = [INTERNAL_TO_PROJECT_NAMES[name]
+                               for name in scene_objects]
         result.confidences = [1. for _ in scene_objects]
 
         self._server.set_succeeded(result)
