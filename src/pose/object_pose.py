@@ -130,37 +130,37 @@ def get_gt_pose_camera_frame_bop(object_pose_file_path, camera_pose_file_path):
     return objects_gt_poses_list, np.asarray(objects_id), image_ids
 
 
-def load_objects_models(object_names, objects_path, cmap=plt.cm.tab20(range(20)), mesh_num_samples=500):
+def load_objects_models(object_names, objects_path, cmap=plt.cm.tab20(range(20)), mesh_num_samples=500, scale=1000):
     meshes = {}
     sampled_down_meshes = {}
 
     for oi, object_name in enumerate(object_names):
         # Load mesh
-        verts, faces_idx, _ = load_obj(os.path.join(objects_path, f'{object_name}/{object_name}_simple.obj'))
+        verts, faces_idx, _ = load_obj(os.path.join(objects_path, f'{object_name}.obj'))
         textures = TexturesVertex(
             verts_features=torch.from_numpy(cmap[oi][:3])[None, None, :]
                                     .expand(-1, verts.shape[0], -1).type_as(verts)
         )
         mesh = Meshes(
-            verts=[verts],
+            verts=[verts/scale],
             faces=[faces_idx.verts_idx],
             textures=textures
         )
 
-        meshes[object_name] = mesh
+        meshes[oi+1] = mesh
 
         # Create a randomly point-normal set
         # Same number of points for each individual object
-        mesh_sampled_down = trimesh.load(os.path.join(objects_path, f'{object_name}/{object_name}_simple.obj'))
+        mesh_sampled_down = trimesh.load(os.path.join(objects_path, f'{object_name}.obj'))
         norms = mesh_sampled_down.face_normals
         samples = trimesh.sample.sample_surface_even(mesh_sampled_down, mesh_num_samples) # either exactly NUM_samples, or <= NUM_SAMPLES --> pad by random.choice
         samples_norms = norms[samples[1]] # Norms pointing out of the object
-        samples_point_norm = np.concatenate((np.asarray(samples[0]), np.asarray(0-samples_norms)), axis=1)
+        samples_point_norm = np.concatenate((np.asarray(samples[0]/scale), np.asarray(0-samples_norms)), axis=1)
         if samples_point_norm.shape[0] < mesh_num_samples:  # NUM_SAMPLES not equal to mesh_num_samples -> padding
             idx = np.random.choice(samples_point_norm.shape[0], mesh_num_samples - samples_point_norm.shape[0])
             samples_point_norm = np.concatenate((samples_point_norm, samples_point_norm[idx]), axis=0)
 
-        sampled_down_meshes[object_name] = torch.from_numpy(samples_point_norm.astype(np.float32))[None, ...]
+        sampled_down_meshes[oi+1] = torch.from_numpy(samples_point_norm.astype(np.float32))[None, ...]
 
     return meshes, sampled_down_meshes
 

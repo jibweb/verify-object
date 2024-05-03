@@ -25,18 +25,27 @@ device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("
 torch.autograd.set_detect_anomaly(True)  # To check whether we have nan or inf in our gradient calculation
 
 
-
-SUPPORTED_OBJECTS = [
-    'container'
-]
-
 INTERNAL_TO_PROJECT_NAMES = {
-    'container': 'Canister',
+    1: "MediumBottle",
+    2: "SmallBottle",
+    3: "Needle",
+    4: "NeedleCap",
+    5: "RedPlug",
+    6: "Canister",
+    7: "LargeBottle",
+    8: "YellowPlug",
+    9: "WhiteClamp",
+    10: "RedClamp",
+    # 'container': 'Canister',
 }
+
 
 PROJECT_TO_INTERNAL_NAMES = {
     v: k for (k, v) in INTERNAL_TO_PROJECT_NAMES.items()
 }
+
+
+SUPPORTED_OBJECTS = INTERNAL_TO_PROJECT_NAMES.keys()
 
 
 class VerifyPose:
@@ -73,7 +82,7 @@ class VerifyPose:
         # load all meshes that will be needed
         self.cmap = plt.cm.tab20(range(20)) # 20 different colors, two consecutive ones are similar (for two instances)
         meshes, sampled_down_meshes = object_pose.load_objects_models(
-            SUPPORTED_OBJECTS,
+            ["obj_{:06d}".format(obj_id) for obj_id in SUPPORTED_OBJECTS],
             cfg.objects_path,
             cmap=self.cmap,
             mesh_num_samples=cfg.mesh_num_samples)
