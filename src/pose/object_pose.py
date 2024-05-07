@@ -226,12 +226,11 @@ def scene_optimization(logger, t_mag, isbop, scene_path, mask_path, scene_number
     return best_metrics, iter_values
 
 
-def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_init_list,
-        optim_cfg, T_igt_list,
-        logger, im_id, debug_flag, img_debug_name,
-        isbop):
+def optimization_step(model, reference_rgb, reference_depth, reference_masks,
+                      optim_cfg, T_igt_list, debug_flag, debug_path, isbop):
     # For visualization
-    iter_values = {"r": [], "t": [], "loss": [], "image_id": im_id}
+    # iter_values = {"r": [], "t": [], "loss": [], "image_id": im_id}
+    iter_values = {"r": [], "t": [], "loss": []}
 
     # If the loss num = 6, calculate the 2D SDF
     if optim_cfg.losses.contour_loss.active:
@@ -239,11 +238,6 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         sdf_image = compute_sdf_image(reference_rgb, reference_masks)
     else:
         sdf_image = None
-
-
-    # Initializate model
-    # T_init_list_transposed = [T_init.transpose(-2, -1) for T_init in T_init_list]
-    # model.init(None, T_init_list)  # note: pytorch3d uses [[R,0], [t, 1]] format (-> transposed)
 
     if T_igt_list:
         metrics, metrics_str = model.evaluate_progress(
@@ -253,7 +247,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
         metrics, metrics_str = {"ADI": 1, "ADD": 1}, "No grountruth available for metrics"
 
     # Optimization
-    scene_early_stopping_loss = len(T_init_list) * sum(
+    scene_early_stopping_loss = len(reference_masks) * sum(
         [v.weight * v.early_stopping_loss for k, v in optim_cfg.losses.__dict__.items() if v.active]
     )
 
@@ -273,12 +267,7 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
 
     optimizer = optimizer_type(model.parameters(), lr=optim_cfg.learning_rate)  # TODO try different optimizers
     best_metrics, best_metrics_str = metrics, metrics_str
-    best_T_list = T_init_list
     best_R_list, best_t_list = model.get_R_t()
-
-    if debug_flag:
-        if not os.path.exists(f"../{img_debug_name}/{im_id}/"):
-            os.makedirs(f"../{img_debug_name}/{im_id}/")
 
     reference_masks_tensors = [
         torch.from_numpy(mask.astype(np.float32)).to(device)
@@ -289,58 +278,25 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
 
         optimizer.zero_grad()
 
-        loss, image, losses_values = model(
+        loss, losses_values, image_est, depth_est, obj_masks, fragments_est = model(
             reference_rgb,
             reference_depth,
-            reference_masks_tensors,
-            debug_flag)  # Calling forward function
+            reference_masks_tensors)  # Calling forward function
 
         loss.backward()
         optimizer.step()
 
         if debug_flag:
-            out_np = K.utils.tensor_to_image(torch.movedim(image[..., :3], 3, 1))
-            plt.imshow(out_np); plt.savefig("/data/debug/optim{:05d}.png".format(i))
+            out_np = K.utils.tensor_to_image(torch.movedim(image_est[..., :3], 3, 1))
+            plt.imshow(out_np); plt.savefig(os.path.join(debug_path, "optim{:05d}.png".format(i)))
 
-        pbar.set_description("LOSSES: {}".format(" | ".join([f"{name}: {loss_val:.3f}" for name, loss_val in losses_values.items()])))
+        pbar.set_description("LOSSES: {}".format(
+            " | ".join([f"{name}: {np.array(loss_val).sum():.3f}"
+                        for name, loss_val in losses_values.items()])))
 
         # early stopping
         if loss.item() < scene_early_stopping_loss:
             break
-
-        # logging
-        logger.record(f"loss_value_{im_id}", loss.item())
-        # logger.record(f"diff_rend_loss_value_{im_id}", diff_rend_loss.item())
-        # logger.record(f"signed_dis_loss_value_{im_id}", signed_dis_loss.item())
-        # if contour_loss is not None:
-        #     logger.record(f"contour_loss_value_{im_id}", contour_loss.item())
-        logger.record(f"ADD_value_{im_id}", metrics['ADD'])
-        # logger.dump(step=i)
-
-        # visualization
-        if i % 5 == 0:
-            # TODO: Here is changed until the end of "if"
-            if T_igt_list:
-                metrics, metrics_str = model.evaluate_progress(
-                    [T_igt.transpose(-2, -1) for T_igt in T_igt_list],
-                    isbop=isbop)
-
-            R_list, t_list = model.get_R_t()
-            iter_values["r"].append([(R.to('cpu').detach().numpy()).tolist() for R in R_list])
-            iter_values["t"].append([(t.to('cpu').detach().numpy()).tolist() for t in t_list])
-            iter_values["loss"].append(float(loss.to('cpu').detach().numpy()))
-            # print("ADI and best _____________")
-
-            # visualization_progress(model, reference_rgb, R_list, t_list)
-
-            if metrics['ADI'] < best_metrics['ADI']:
-                best_metrics, best_metrics_str = metrics, metrics_str
-                best_R_list, best_t_list = model.get_R_t()
-                best_T_list = [T.transpose(-2, -1) for T in model.get_transform()]
-                logger.record("best_loss", loss.item())
-                logger.record("ADD_best", metrics['ADD'])
-
-        logger.dump(step=i)
 
     # record end and synchronize
     end.record()
@@ -350,8 +306,6 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks, T_
     print("______timing_________: ", start.elapsed_time(end))
 
     iter_values.setdefault("best_T")
-    iter_values['best_T'] = [(best_T.to('cpu').detach().numpy()).tolist()[0] for best_T in best_T_list]
-    # print("THE BEST ___________________", np.min(best_dis.cpu().detach().numpy()))
     iter_values["r"].append([(best_R.to('cpu').detach().numpy()).tolist() for best_R in best_R_list])
     iter_values["t"].append([(best_t.to('cpu').detach().numpy()).tolist() for best_t in best_t_list])
     iter_values["loss"].append(0)

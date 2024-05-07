@@ -28,6 +28,6 @@ class LossesConfig(BaseConfig):
 class OptimizationConfig(BaseConfig):
     learning_rate: float = 0.015
     optimizer_name: str = 'adam'
-    max_iter: int = 50
+    max_iter: int = 30
     pose_representation : str = 'q'  # choices=['so3', 'se3', 'q'], help='q for [q, t], so3 for [so3_log(R), t] or se3 for se3_log([R, t])'
     losses : LossesConfig = field(default_factory=LossesConfig)

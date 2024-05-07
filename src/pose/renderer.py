@@ -9,7 +9,7 @@ from pytorch3d.transforms import (
 )
 from pytorch3d.renderer import (
     RasterizationSettings, MeshRenderer, MeshRasterizer,
-    PointLights, BlendParams, SoftSilhouetteShader, SoftGouraudShader, HardPhongShader,
+    PointLights, BlendParams, SoftSilhouetteShader, HardGouraudShader, SoftGouraudShader, HardPhongShader,
 )
 from pytorch3d.renderer.mesh.renderer import MeshRendererWithFragments
 from pytorch3d.utils import cameras_from_opencv_projection
@@ -67,7 +67,8 @@ class Renderer(nn.Module):
         soft_raster_settings = RasterizationSettings(
             image_size=(height, width),
             blur_radius=np.log(1. / 1e-4 - 1.) * blend_params.sigma,
-            faces_per_pixel=50,
+            faces_per_pixel=40,
+            max_faces_per_bin=20000,
             perspective_correct=True, # TODO: Correct?
         )
         lights = PointLights(device=device, location=((0.0, 0.0, 0.0),), ambient_color=((1.0, 1.0, 1.0),),
@@ -96,9 +97,12 @@ class Renderer(nn.Module):
         elif self.representation == 'in-plane':
             # TODO dummies
             self.scale_rotation = 10  # bigger impact of rotation st it's not dominated by translation
-        self.image_ref = None  # Image mask reference
 
     def init(self, scene_objects, T_init_list): # TODO : Did I do it correctly here?
+        print('scene_objects', scene_objects)
+        if hasattr(self, 'scene_meshes'):
+            del self.scene_meshes
+
         self.scene_meshes = [
             self.meshes[object_name].clone().to(device)
             for object_name in scene_objects
@@ -110,8 +114,8 @@ class Renderer(nn.Module):
             self.r_list = nn.Parameter(torch.stack([(so3_log_map(T_init[:, :3, :3])) for T_init in T_init_list]))
             self.t_list = nn.Parameter(torch.stack([(T_init[:, :3, 3]) for T_init in T_init_list]))
         elif self.representation == 'q':  # [q, t] representation
-            self.q_list = nn.Parameter(torch.stack([(matrix_to_quaternion(T_init[:, :3, :3])) for T_init in T_init_list]))
-            self.t_list = nn.Parameter(torch.stack([(T_init[:, :3, 3]) for T_init in T_init_list]))
+            self.q_list = nn.Parameter(torch.stack([(matrix_to_quaternion(T_init[:, :3, :3])) for T_init in T_init_list])).to(self.device)
+            self.t_list = nn.Parameter(torch.stack([(T_init[:, :3, 3]) for T_init in T_init_list])).to(self.device)
         # elif self.representation == 'in-plane': # TODO: Check for in-plane how should this change ?
         #     # in this representation, we only update two delta values
         #     # - rz = in-plane z rotation, txy = in-plane xy translation

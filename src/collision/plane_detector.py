@@ -40,6 +40,7 @@ class PlaneDetector:
         plane, scene = cloud.select_by_index(indices), cloud.select_by_index(indices, invert=True)
         # plane, scene = cloud.select_down_sample(indices), cloud.select_down_sample(indices, invert=True)  # open3d==0.9.0.0
 
+
         if len(coefficients) == 0:
             raise ValueError("no coefficients for plane - none detected")
 

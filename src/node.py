@@ -92,11 +92,13 @@ class VerifyPose:
             meshes,
             sampled_down_meshes,
             self.intrinsics,
-            self.camera_info.width // self.scale, self.camera_info.height // self.scale,
+            self.camera_info.width // self.scale,
+            self.camera_info.height // self.scale,
             cfg.optim,
-            image_scale=self.scale).to(device)
+            debug=self.debug_flag,
+            debug_path=self.cfg.debug_path)
 
-        # create server
+        # Create server
         self._server = SimpleActionServer(name, VerifyObjectAction, execute_cb=self.callback, auto_start=False)
         self._server.start()
         rospy.loginfo(f"[{name}] Action Server ready")
@@ -134,9 +136,10 @@ class VerifyPose:
         intrinsics = self.intrinsics.copy()
 
         if self.debug_flag:
-            cv2.imwrite("/data/debug/input_depth.png", depth)
-            cv2.imwrite("/data/debug/input_color.png", rgb)
+            cv2.imwrite(os.path.join(self.cfg.debug_path, "input_depth.png"), depth)
+            cv2.imwrite(os.path.join(self.cfg.debug_path, "input_color.png"), rgb)
 
+        # Scale images ========================================================
         if self.scale != 1:
             rgb = cv2.resize(rgb, (rgb.shape[1] // self.scale, rgb.shape[0] // self.scale))
 
@@ -156,26 +159,11 @@ class VerifyPose:
 
         reference_height, reference_width = rgb.shape[:2]
 
-        t_mag = 1
-        scene_name = "ros_test_scene"
-        logger = Logger(log_dir=os.path.join(cfg.path_repo, f"logs/{scene_name}/loss_num_{1}/{self.cfg.optim.optimizer_name}"),
-                                    log_name=f"{scene_name}_opt_{self.cfg.optim.optimizer_name}_lr_{self.cfg.optim.learning_rate}",
-                                    reset_num_timesteps=True)
-
-        print("------- Scene number: ", scene_name)
-        # For each image in the scene
-
         # prepare events
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         # record start
         start.record()
-
-        im_id = 1 # range(1, number_of_scene_image+1)
-        # for im_id in range(1, number_of_scene_image+1): # range(1, number_of_scene_image+1)
-        # im_id = 37
-        print(f"im {im_id}: optimizing...")
-
 
         # Extract plane =======================================================
         if self.plane_model is None:
@@ -184,7 +172,7 @@ class VerifyPose:
                 to_meters=1e-3,
                 distance_threshold=0.01)
             plane_T, plane, scene, cloud, indices = plane_det.detect(
-                rgb, depth, intrinsics, max_dist=1.0)
+                rgb, depth, intrinsics, max_dist=1.5)
 
             # Create the filtered scene depth image
             scene_depth = project_point_cloud(
@@ -215,13 +203,13 @@ class VerifyPose:
 
         #TODO order detections (and cut out part of bounding box occluded by front detection)
         #TODO filter supported objects?
-        #TODO filter out detections where the silhouette doesn't overlap with the detection
 
         # Prepare target silhouettes ==========================================
         if len(goal.object_masks) == 0:
             masks = self.create_masks_from_bounding_boxes(
                 bounding_boxes, reference_height, reference_width)
-
+        else:
+            masks = list(np.array(masks)[valid_det_mask])
 
         # Create colored instance mask
         reference_mask = np.zeros((reference_height, reference_width, 3))
@@ -229,8 +217,8 @@ class VerifyPose:
             reference_mask[mask] = self.cmap[mask_idx, :3]
 
         if self.debug_flag:
-            plt.imshow(reference_mask); plt.savefig("/data/debug/ref_mask.png")
-            plt.imshow(scene_depth); plt.savefig("/data/debug/ref_depth.png")
+            plt.imshow(reference_mask); plt.savefig(os.path.join(self.cfg.debug_path, "ref_mask.png"))
+            plt.imshow(scene_depth); plt.savefig(os.path.join(self.cfg.debug_path, "ref_depth.png"))
 
         # Set up optimization =================================================
         self.model.plane_pcd = plane
@@ -244,13 +232,28 @@ class VerifyPose:
 
         # Check initial detections ============================================
         # TODO: make this step conditional, whether the object is in hand or on plane
-        # use plane model and mesh instead of depth
-        image_est, depth_est, obj_masks, fragments_est = self.model.renderer()
-        for mask_idx, mask in enumerate(obj_masks):
-            diff_z = det_mean_dist[mask_idx] - depth_est[mask].mean()
-            T_init_list[mask_idx][0, 2, 3] += diff_z
+        # and use plane model and mesh instead of depth
+        valid_silhouette_mask = np.ones(len(scene_objects), dtype=bool)
+        with torch.no_grad():
+            image_est, depth_est, obj_masks, fragments_est = self.model.renderer()
+            for mask_idx, obj_mask in enumerate(obj_masks):
+                ref_mask = torch.from_numpy(masks[mask_idx].astype(np.float32)).to(device)
+                union = ((obj_mask + ref_mask) > 0).float()
+                silhouette_loss = torch.sum(
+                    (obj_mask.float() - ref_mask)**2
+                ) / torch.sum(union)
+                if silhouette_loss > 0.9:
+                    valid_silhouette_mask[mask_idx] = False
 
-        # Re-init the model with the corrected poses
+                diff_z = det_mean_dist[mask_idx] - depth_est[obj_mask].mean()
+                T_init_list[mask_idx][0, 2, 3] += diff_z
+
+        scene_objects = list(np.array(scene_objects)[valid_silhouette_mask])
+        T_init_list = [pose for idx, pose in enumerate(T_init_list)
+                       if valid_silhouette_mask[idx]]
+        masks = list(np.array(masks)[valid_silhouette_mask])
+
+        # Re-init the model with the corrected filtered poses
         self.model.init(
             scene_objects,
             T_init_list,
@@ -258,10 +261,8 @@ class VerifyPose:
 
         # Perform optimization ================================================
         best_metrics, iter_values = object_pose.optimization_step(
-            self.model, rgb, scene_depth, masks, T_init_list, self.cfg.optim, None,
-            #self.optimizer_name, self.max_num_iterations, self.early_stopping_loss, self.lr,
-            logger, im_id, self.debug_flag, f"debug/{scene_name}/loss_num_{1}/{self.cfg.optim.optimizer_name}/{self.cfg.optim.learning_rate}",
-            isbop=False)
+            self.model, rgb, scene_depth, masks, self.cfg.optim, None,
+            self.debug_flag, self.cfg.debug_path, isbop=False)
 
         best_R_list, best_t_list = self.model.get_R_t()
         predicted_poses = []
@@ -271,17 +272,12 @@ class VerifyPose:
             pose[:3, 3] = best_t.to('cpu').detach().numpy()[0]
             predicted_poses.append(pose)
 
-
         self.publish_viz(rgb, scene_objects, bounding_boxes, predicted_poses, [0.5 for _ in scene_objects], intrinsics)
 
         end.record()
         torch.cuda.synchronize()
         # get time between events (in ms)
         print("____Timing for the whole scene:______", start.elapsed_time(end))
-        # torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
-
-
-        logger.close()
 
         result = VerifyObjectResult()
         result.object_poses = [

@@ -1,4 +1,4 @@
-
+import os
 import torch
 import torch.nn as nn
 import open3d as o3d
@@ -16,23 +16,20 @@ import matplotlib.pyplot as plt
 import kornia as K
 
 class OptimizationModel(nn.Module):
-    def __init__(self, meshes, sampled_meshes, intrinsics, width, height, cfg, image_scale=1, BOP=False):
+    def __init__(self, meshes, sampled_meshes, intrinsics, width, height, cfg, debug=False, debug_path="/debug"):
         super().__init__()
-        self.meshes = meshes
+        # self.meshes = meshes
         self.sampled_meshes = sampled_meshes
         self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
         self.cfg = cfg
+        self.debug = debug
+        self.debug_path = debug_path
 
         self.meshes_diameter = None
-
-        # Plane (Table in this dataset) point clouds and transformation matrix
-        # self.plane_pcd = None
-        # self.plane_T_matrix = None
+        self.mask_sigma = 1e-4
 
         # Set up renderer
         self.renderer = Renderer(meshes, intrinsics, width, height, representation=cfg.pose_representation)
-
-        # self.image_ref = None  # Image mask reference
 
     def init(self, scene_objects, T_init_list, T_plane=None):
         # Init for rendering
@@ -176,7 +173,7 @@ class OptimizationModel(nn.Module):
     def get_R_t(self):
         return self.renderer.get_R_t()
 
-    def forward(self, ref_rgb, ref_depth, ref_masks, debug_flag):
+    def forward(self, ref_rgb, ref_depth, ref_masks):
         # Render the silhouette using the estimated pose
         image_est, depth_est, obj_masks, fragments_est = self.renderer()
 
@@ -186,22 +183,34 @@ class OptimizationModel(nn.Module):
         # Silhouette loss -----------------------------------------------------
         if self.cfg.losses.silhouette_loss.active:
             diff_rend_loss = torch.zeros(len(ref_masks)).to(device)
+            # Mask for padded pixels.
+            mask = fragments_est.pix_to_face >= 0
+
+            # Sigmoid probability map based on the distance of the pixel to the face
+            prob_map = torch.sigmoid(-fragments_est.dists / self.mask_sigma) * mask
+
+            # The cumulative product ensures that alpha will be 0.0 if at least 1
+            # face fully covers the pixel as for that face, prob will be 1.0.
+            # This results in a multiplication by 0.0 because of the (1.0 - prob)
+            # term. Therefore 1.0 - alpha will be 1.0.
+            alpha = torch.prod((1.0 - prob_map), dim=-1)
+
             for mask_idx, ref_mask in enumerate(ref_masks):
                 image_unique_mask = torch.where(
-                    obj_masks[mask_idx] > 0, image_est[..., 3], 0)
+                    obj_masks[mask_idx] > 0, 1-alpha, 0)
 
                 union = ((image_unique_mask + ref_mask) > 0).float()
                 diff_rend_loss[mask_idx] = torch.sum(
                     (image_unique_mask - ref_mask)**2
                 ) / torch.sum(union) # Corresponds to 1 - IoU
 
-                if debug_flag:
-                    out_np = K.utils.tensor_to_image((image_unique_mask - ref_mask)**2)
-                    plt.imshow(out_np); plt.savefig("/data/debug/mask-{}.png".format(mask_idx))
+                if self.debug:
+                    out_np = K.utils.tensor_to_image(((image_unique_mask - ref_mask)**2))
+                    plt.imshow(out_np); plt.savefig(os.path.join(self.debug_path, "mask-{}.png".format(mask_idx)))
 
-            diff_rend_loss = torch.sum(diff_rend_loss)
-            loss += diff_rend_loss * self.cfg.losses.silhouette_loss.weight
-            losses_values['silhouette'] = diff_rend_loss.item()
+            # diff_rend_loss = torch.sum(diff_rend_loss)
+            loss += torch.sum(diff_rend_loss) * self.cfg.losses.silhouette_loss.weight
+            losses_values['silhouette'] = diff_rend_loss.cpu().detach().numpy() # .item()
 
         # Collision loss ------------------------------------------------------
         if self.cfg.losses.collision_loss.active:
@@ -231,107 +240,11 @@ class OptimizationModel(nn.Module):
             loss += depth_loss * self.cfg.losses.depth_loss.weight
             losses_values['depth'] = depth_loss.item()
 
-        if debug_flag:
+        if self.debug:
             out_np = K.utils.tensor_to_image(depth_est)
-            plt.imshow(out_np); plt.savefig("/data/debug/depth_est.png")
+            plt.imshow(out_np); plt.savefig(os.path.join(self.debug_path, "depth_est.png"))
 
-        # print("MODEL", 3, "Mem allocated", torch.cuda.memory_allocated(0)/1024**2)
-
-        return loss, image_est, losses_values
-
-    def evaluate_progress(self, T_igt_list, isbop): # TODO: for checking
-        # note: we use the [[R, t], [0, 1]] convention here -> transpose all matrices
-        T_est_list = [T.transpose(-2, -1) for T in self.get_transform()]
-        T_res_list = [T_igt_list[i].transpose(-2, -1) @ T_est_list[i] for i in range(len(T_igt_list))]  # T_est @ T_igt
-
-        # metrics_list = []
-        # metrics_str_list = []
-        metrics_dict = {
-            'R_iso': [],  # [deg] error between GT and estimated rotation
-            't_iso': [],  # [mm] error between GT and estimated translation
-            'ADD_abs': [],  # [mm] average distance between model points
-            'ADI_abs': [],  # -//- nearest model points
-            'ADD': [],  # [%] of model diameter
-            'ADI': [],  # -//- nearest model points
-        }
-
-        for i in range(len(self.meshes)):
-            T_res = T_res_list[i]
-
-            # isometric errors
-            R_trace = T_res[:, 0, 0] + T_res[:, 1, 1] + T_res[:, 2, 2]  # note: torch.trace only supports 2D matrices
-            R_iso = torch.rad2deg(torch.arccos(torch.clamp(0.5 * (R_trace - 1), min=-1.0, max=1.0)))
-            metrics_dict["R_iso"].append(float(R_iso))
-            t_iso = torch.norm(T_res[:, :3, 3])
-            metrics_dict["t_iso"].append(float(t_iso))
-            # ADD/ADI error #TODO : number of samples for each object in the scene. if not equal => wrong
-
-            if isbop:
-                diameters = self.meshes_diameter[i]
-                mesh_pytorch = self.meshes[i]
-                # create from numpy arrays
-                d_mesh = o3d.geometry.TriangleMesh(
-                    vertices=o3d.utility.Vector3dVector(
-                        mesh_pytorch.verts_list()[0].cpu().detach().numpy().copy()),
-                    triangles=o3d.utility.Vector3iVector(
-                        mesh_pytorch.faces_list()[0].cpu().detach().numpy().copy()))
-                simple = d_mesh.simplify_quadric_decimation(
-                    int(9000))
-                mesh = torch.from_numpy(np.asarray(simple.vertices))[None, ...].type(torch.FloatTensor).to(device)
-            else:
-                mesh = self.meshes[i].verts_list()[0][None, ...]
-                diameters = torch.sqrt(square_distance(mesh, mesh).max(dim=-1)[0]).max(dim=-1)[0]
-
-            mesh_off = (T_res[:, :3, :3] @ mesh.transpose(-1, -2)).transpose(-1, -2) + T_res[:, :3, 3][:, None, :]
-            dist_add = torch.norm(mesh - mesh_off, p=2, dim=-1).mean(dim=-1)
-            dist_adi = torch.sqrt(square_distance(mesh, mesh_off)).min(dim=-1)[0].mean(dim=-1)
-            metrics_dict["ADD_abs"].append(float(dist_add) * 1000)
-            # TODO: fix here
-            metrics_dict["ADI_abs"].append(float(dist_adi) * 1000)
-            metrics_dict["ADD"].append(float(dist_add / diameters) * 100)
-            metrics_dict["ADI"].append(float(dist_adi / diameters) * 100)
-        # TODO: Is it ok to convert them to float? not being a tensor anymore
-        metrics = {
-            'R_iso': np.mean(np.asarray(metrics_dict["R_iso"])),  # [deg] error between GT and estimated rotation
-            't_iso': np.mean(np.asarray(metrics_dict["t_iso"])),  # [mm] error between GT and estimated translation
-            'ADD_abs': np.mean(np.asarray(metrics_dict["ADD_abs"])),  # [mm] average distance between model points
-            'ADI_abs': np.mean(np.asarray(metrics_dict["ADI_abs"])),  # -//- nearest model points
-            'ADD': np.mean(np.asarray(metrics_dict["ADD"])),  # [%] of model diameter
-            'ADI': np.mean(np.asarray(metrics_dict["ADI"])),  # -//- nearest model points
-        }
-        # TODO: Fix the metrics_str
-        metrics_str = f"R={metrics['R_iso']:0.1f}deg, t={metrics['t_iso']:0.1f}mm\n" \
-                      f"ADD={metrics['ADD_abs']:0.1f}mm ({metrics['ADD']:0.1f}%)\n" \
-                      f"ADI={metrics['ADI_abs']:0.1f}mm ({metrics['ADI']:0.1f}%)"
-
-        return metrics, metrics_str
-
-    def visualize_progress(self, background, text=""):
-        # estimate
-        R, t = self.get_R_t()
-        image_est = self.ren_vis(meshes_world=self.meshes, R=R, T=t)
-        estimate = image_est[0, ..., -1].detach().cpu().numpy()  # [0, 1]
-        silhouette = estimate > 0
-
-        # visualization
-        vis = background[..., :3].copy()
-        # add estimated silhouette
-        vis *= 0.5
-        vis[..., 2] += estimate * 0.5
-        # # add estimated contour
-        # contour, _ = cv.findContours(np.uint8(silhouette[..., -1] > 0), cv.RETR_CCOMP, cv.CHAIN_APPROX_TC89_L1)
-        # vis = cv.drawContours(vis, contour, -1, (0, 0, 255), 1, lineType=cv.LINE_AA)
-        if text != "":
-            # add text
-            rect = cv.rectangle((vis * 255).astype(np.uint8), (0, 0), (250, 100), (167, 168, 168), -1)
-            vis = ((vis * 0.5 + rect/255 * 0.5) * 255).astype(np.uint8)
-            font_scale, font_color, font_thickness = 0.5, (0, 0, 0), 1
-            x0, y0 = 25, 25
-            for i, line in enumerate(text.split('\n')):
-                y = int(y0 + i * cv.getTextSize(line, cv.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0][1] * 1.5)
-                vis = cv.putText(vis, line, (x0, y),
-                                 cv.FONT_HERSHEY_SIMPLEX, font_scale, font_color, font_thickness, cv.LINE_AA)
-        return vis
+        return loss, losses_values, image_est, depth_est, obj_masks, fragments_est
 
 
 def square_distance(pcd1, pcd2):
