@@ -16,9 +16,11 @@ class LossConfig(BaseConfig):
 @dataclass
 class LossesConfig(BaseConfig):
     silhouette_loss : LossConfig = field(
-        default_factory=lambda: LossConfig(active=True, early_stopping_loss=0.2))
+        default_factory=lambda: LossConfig(active=True, early_stopping_loss=0.002))
     collision_loss : LossConfig = field(
-        default_factory=lambda: LossConfig(active=True, early_stopping_loss=0.03))
+        default_factory=lambda: LossConfig(active=False, early_stopping_loss=0.03))
+    plane_collision_loss : LossConfig = field(
+        default_factory=lambda: LossConfig(active=False, early_stopping_loss=0.03))
     contour_loss : LossConfig = field(
         default_factory=lambda: LossConfig(active=False, early_stopping_loss=0.7))
     depth_loss : LossConfig = field(
@@ -26,8 +28,8 @@ class LossesConfig(BaseConfig):
 
 @dataclass
 class OptimizationConfig(BaseConfig):
-    learning_rate: float = 0.015
+    learning_rate: float = 0.01
     optimizer_name: str = 'adam'
-    max_iter: int = 30
+    max_iter: int = 50
     pose_representation : str = 'q'  # choices=['so3', 'se3', 'q'], help='q for [q, t], so3 for [so3_log(R), t] or se3 for se3_log([R, t])'
     losses : LossesConfig = field(default_factory=LossesConfig)

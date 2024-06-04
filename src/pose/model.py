@@ -1,19 +1,20 @@
+import numpy as np
+import open3d as o3d
 import os
 import torch
 import torch.nn as nn
-import open3d as o3d
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
 from collision import transformations as tra
-import numpy as np
-import cv2 as cv
+from collision.environment import plane_collision_loss
 from contour import contour
 from pose.renderer import Renderer
-
+from pytorch3d.ops import interpolate_face_attributes
 
 import matplotlib.pyplot as plt
 import kornia as K
+
 
 class OptimizationModel(nn.Module):
     def __init__(self, meshes, sampled_meshes, intrinsics, width, height, cfg, debug=False, debug_path="/debug"):
@@ -173,7 +174,7 @@ class OptimizationModel(nn.Module):
     def get_R_t(self):
         return self.renderer.get_R_t()
 
-    def forward(self, ref_rgb, ref_depth, ref_masks):
+    def forward(self, ref_rgb, ref_depth, ref_masks, ref_rays):
         # Render the silhouette using the estimated pose
         image_est, depth_est, obj_masks, fragments_est = self.renderer()
 
@@ -181,36 +182,42 @@ class OptimizationModel(nn.Module):
         losses_values = {}
 
         # Silhouette loss -----------------------------------------------------
+        MAX_FACE = 5
         if self.cfg.losses.silhouette_loss.active:
             diff_rend_loss = torch.zeros(len(ref_masks)).to(device)
             # Mask for padded pixels.
-            mask = fragments_est.pix_to_face >= 0
+            valid_mask = fragments_est.pix_to_face >= 0
+            pix_position = interpolate_face_attributes(
+                fragments_est.pix_to_face,
+                torch.ones(fragments_est.bary_coords.shape, device=device),
+                self.renderer.scene_transformed.verts_packed()[
+                    self.renderer.scene_transformed.faces_packed()]
+            )[..., :MAX_FACE, :]
 
-            # Sigmoid probability map based on the distance of the pixel to the face
-            prob_map = torch.sigmoid(-fragments_est.dists / self.mask_sigma) * mask
+            for ray_idx, ray in enumerate(ref_rays):
+                obj_face_mask = torch.logical_and(
+                    valid_mask[..., :MAX_FACE],  # Only consider the 5 closest faces
+                    obj_masks[ray_idx][..., None])
+                obj_pix_position = pix_position[obj_face_mask]
 
-            # The cumulative product ensures that alpha will be 0.0 if at least 1
-            # face fully covers the pixel as for that face, prob will be 1.0.
-            # This results in a multiplication by 0.0 because of the (1.0 - prob)
-            # term. Therefore 1.0 - alpha will be 1.0.
-            alpha = torch.prod((1.0 - prob_map), dim=-1)
+                t = torch.einsum(
+                    'ijkl,ijkl->ijk',
+                    ray[None,:,None,:],
+                    obj_pix_position[:,None,None,:])
 
-            for mask_idx, ref_mask in enumerate(ref_masks):
-                image_unique_mask = torch.where(
-                    obj_masks[mask_idx] > 0, 1-alpha, 0)
+                pt_ray_distance = torch.norm(
+                    t*ray[None, ...] - obj_pix_position[:,None,:],
+                    # p=2,
+                    dim=-1)
 
-                union = ((image_unique_mask + ref_mask) > 0).float()
-                diff_rend_loss[mask_idx] = torch.sum(
-                    (image_unique_mask - ref_mask)**2
-                ) / torch.sum(union) # Corresponds to 1 - IoU
+                closest_pt_to_rays = pt_ray_distance.min(dim=0).values.mean()
+                closest_ray_to_pts = pt_ray_distance.min(dim=1).values.mean()
 
-                if self.debug:
-                    out_np = K.utils.tensor_to_image(((image_unique_mask - ref_mask)**2))
-                    plt.imshow(out_np); plt.savefig(os.path.join(self.debug_path, "mask-{}.png".format(mask_idx)))
+                diff_rend_loss[ray_idx] = (closest_pt_to_rays + closest_ray_to_pts) / 2
 
             # diff_rend_loss = torch.sum(diff_rend_loss)
             loss += torch.sum(diff_rend_loss) * self.cfg.losses.silhouette_loss.weight
-            losses_values['silhouette'] = diff_rend_loss.cpu().detach().numpy() # .item()
+            losses_values['silhouette'] = torch.sum(diff_rend_loss).item()
 
         # Collision loss ------------------------------------------------------
         if self.cfg.losses.collision_loss.active:
@@ -219,6 +226,17 @@ class OptimizationModel(nn.Module):
             signed_dis_loss = torch.max(signed_dis)
             loss += signed_dis_loss * self.cfg.losses.collision_loss.weight
             losses_values['collision'] = signed_dis_loss.item()
+
+        if self.cfg.losses.plane_collision_loss.active and hasattr(self, 'plane_T_matrix'):
+            plane_col_loss, plane_cont_loss = plane_collision_loss(
+                self.scene_sampled_meshes,
+                self.renderer.get_transform(),
+                self.plane_T_matrix)
+            loss += plane_col_loss * self.cfg.losses.plane_collision_loss.weight
+            loss += plane_cont_loss * self.cfg.losses.plane_collision_loss.weight
+            losses_values['plane_col'] = plane_col_loss.item()
+            losses_values['plane_cont'] = plane_cont_loss.item()
+
 
         # Contour loss --------------------------------------------------------
         if self.cfg.losses.contour_loss.active:
@@ -239,10 +257,6 @@ class OptimizationModel(nn.Module):
             depth_loss = torch.sum(d_depth**2) / (d_depth.shape[0])
             loss += depth_loss * self.cfg.losses.depth_loss.weight
             losses_values['depth'] = depth_loss.item()
-
-        if self.debug:
-            out_np = K.utils.tensor_to_image(depth_est)
-            plt.imshow(out_np); plt.savefig(os.path.join(self.debug_path, "depth_est.png"))
 
         return loss, losses_values, image_est, depth_est, obj_masks, fragments_est
 

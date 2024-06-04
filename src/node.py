@@ -3,7 +3,9 @@ import numpy as np
 import os
 import sys
 import torch
+from tqdm import tqdm
 import yaml
+
 from pose.model import OptimizationModel
 import pose.object_pose as object_pose
 from collision.plane_detector import PlaneDetector
@@ -74,7 +76,9 @@ class VerifyPose:
 
         self.scale = self.camera_info.width // 640
         self.intrinsics = np.array(self.camera_info.K).reshape(3,3)
-        self.intrinsics[:2, :] //= self.scale
+        self.intrinsics[:2, :] /= self.scale
+
+        print("Intrisics", np.array(self.camera_info.K).reshape(3,3), self.intrinsics)
 
         # TODO: set from rosparam:
         self.cfg = cfg
@@ -117,6 +121,29 @@ class VerifyPose:
             np.logical_and(mask.astype(bool), depth != 0)
             for mask in masks
         ]
+
+    def refine_masks_with_grabcut(self, ref_rgb, masks):
+        kernel = np.ones((5,5),np.uint8)
+        refined_masks = []
+        for mask in tqdm(masks, desc='Mask refinement with GrabCut'):
+            obj_mask = mask.astype(np.uint8)
+            erosion = cv2.erode(obj_mask, kernel, iterations=1)
+            dilation = cv2.dilate(obj_mask, kernel, iterations=1)
+            new_mask = np.zeros(obj_mask.shape, dtype=np.uint8)
+            new_mask[dilation.astype(bool)] = 2
+            new_mask[erosion.astype(bool)] = 1
+
+            bgdModel = np.zeros((1,65),np.float64)
+            fgdModel = np.zeros((1,65),np.float64)
+
+            gb_mask, bgdModel, fgdModel = cv2.grabCut(
+                ref_rgb, new_mask, None, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_MASK)
+
+            refined_masks.append(
+                np.where((gb_mask==2)|(gb_mask==0),False,True)
+            )
+
+        return refined_masks
 
     def callback(self, goal):
         # Parse goal message ==================================================
@@ -211,13 +238,18 @@ class VerifyPose:
         else:
             masks = list(np.array(masks)[valid_det_mask])
 
+        if self.cfg.mask_grabcut_refinement:
+            masks = self.refine_masks_with_grabcut(rgb, masks)
+
         # Create colored instance mask
         reference_mask = np.zeros((reference_height, reference_width, 3))
         for mask_idx, mask in enumerate(masks):
             reference_mask[mask] = self.cmap[mask_idx, :3]
 
         if self.debug_flag:
-            plt.imshow(reference_mask); plt.savefig(os.path.join(self.cfg.debug_path, "ref_mask.png"))
+            cv2.imwrite(os.path.join(self.cfg.debug_path, "ref_mask.png"),
+                        (0.7*255*reference_mask + 0.3*rgb).astype(np.uint8))
+            cv2.imwrite(os.path.join(self.cfg.debug_path, "ref_rgb.png"), rgb)
             plt.imshow(scene_depth); plt.savefig(os.path.join(self.cfg.debug_path, "ref_depth.png"))
 
         # Set up optimization =================================================
@@ -245,8 +277,8 @@ class VerifyPose:
                 if silhouette_loss > 0.9:
                     valid_silhouette_mask[mask_idx] = False
 
-                diff_z = det_mean_dist[mask_idx] - depth_est[obj_mask].mean()
-                T_init_list[mask_idx][0, 2, 3] += diff_z
+                # diff_z = det_mean_dist[mask_idx] - depth_est[obj_mask].mean()
+                # T_init_list[mask_idx][0, 2, 3] += diff_z
 
         scene_objects = list(np.array(scene_objects)[valid_silhouette_mask])
         T_init_list = [pose for idx, pose in enumerate(T_init_list)
@@ -283,7 +315,6 @@ class VerifyPose:
         result.object_poses = [
             ros_numpy.msgify(Pose, pose) for pose in predicted_poses
         ]
-
         result.header = goal.header
         # result.bounding_boxes = bounding_boxes
         # for mask in obj_masks: #TODO obtain updated masks from renderer

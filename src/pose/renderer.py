@@ -27,20 +27,17 @@ class Renderer(nn.Module):
         super().__init__()
         self.meshes = meshes
         self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
-        self.camera_ins = None
-
-        # self.meshes_diameter = None
 
         # Plane (Table in this dataset) point clouds and transformation matrix
         self.plane_pcd = None
         self.plane_T_matrix = None
 
         # Camera intrinsic
+        self.intrinsics = intrinsics
         cam = o3d.camera.PinholeCameraIntrinsic()
         cam.intrinsic_matrix = intrinsics.tolist()
         cam.height = height
         cam.width = width
-        self.camera_ins = cam
 
         # Camera
         # - "assume that +X points left, and +Y points up and +Z points out from the image plane"
@@ -66,10 +63,10 @@ class Renderer(nn.Module):
         blend_params = BlendParams(sigma=1e-4, gamma=1e-4, background_color=(0.0, 0.0, 0.0))  # TODO vary this, faces_per_pixel etc. to find good value
         soft_raster_settings = RasterizationSettings(
             image_size=(height, width),
-            blur_radius=np.log(1. / 1e-4 - 1.) * blend_params.sigma,
-            faces_per_pixel=40,
+            blur_radius= 0., #np.log(1. / 1e-4 - 1.) * blend_params.sigma,
+            faces_per_pixel=20,
             max_faces_per_bin=20000,
-            perspective_correct=True, # TODO: Correct?
+            # perspective_correct=True, # TODO: Correct?
         )
         lights = PointLights(device=device, location=((0.0, 0.0, 0.0),), ambient_color=((1.0, 1.0, 1.0),),
                              diffuse_color=((0.0, 0.0, 0.0),), specular_color=((0.0, 0.0, 0.0),),
@@ -81,7 +78,7 @@ class Renderer(nn.Module):
             ),
             # shader=SoftSilhouetteShader(blend_params=blend_params)
             shader=SoftGouraudShader(blend_params=blend_params, device=device, cameras=self.cameras, lights=lights)
-        )
+        ).to(device)
 
         # Placeholders for optimization parameters and the reference image
         # - rotation matrix must be orthogonal (i.e., element of SO(3)) - easier to use quaternion
@@ -169,23 +166,24 @@ class Renderer(nn.Module):
                 mesh = mesh.update_padded(new_verts_padded)
                 meshes_transformed.append(mesh)
                 meshes_faces_num.append(meshes_faces_num[-1] + mesh.faces_packed().shape[0])
-            scene_transformed = join_meshes_as_scene(meshes_transformed)
+            self.scene_transformed = join_meshes_as_scene(meshes_transformed)
 
             # Fragments have : pix_to_face, zbuf, bary_coords, dists
-            image_est, fragments_est = self.ren_opt(meshes_world=scene_transformed,
-                                                    R=torch.eye(3)[None, ...].to(device),
-                                                    T=torch.zeros((1, 3)).to(device))
+            image_est, self.fragments_est = self.ren_opt(
+                meshes_world=self.scene_transformed,
+                R=torch.eye(3)[None, ...].to(device),
+                T=torch.zeros((1, 3)).to(device))
 
-            zbuf = fragments_est.zbuf # (N, h, w, k ) where N in as_scene = 1
+            zbuf = self.fragments_est.zbuf # (N, h, w, k ) where N in as_scene = 1
             image_depth_est = torch.where(zbuf >= 0, zbuf, max_scene_depth)
             image_depth_est, depth_indices = image_depth_est.min(-1)
             image_depth_est = torch.where(
                 image_depth_est != max_scene_depth, image_depth_est, 0.)
 
-            pix_to_close_face = fragments_est.pix_to_face[..., 0]
+            pix_to_close_face = self.fragments_est.pix_to_face[..., 0]
             obj_masks = []
             for val_idx, val in enumerate(meshes_faces_num[1:]):
                 mesh_mask = (pix_to_close_face >= meshes_faces_num[val_idx]) & (pix_to_close_face < val)
                 obj_masks.append(mesh_mask)
 
-        return image_est, image_depth_est, obj_masks, fragments_est
+        return image_est, image_depth_est, obj_masks, self.fragments_est

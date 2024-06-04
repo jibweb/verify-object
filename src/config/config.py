@@ -16,3 +16,4 @@ class GlobalConfig(BaseConfig):
     objects_path: str = os.path.join(PATH_DATASET_TRACEBOT, 'models')
     debug_path: str = os.path.join(PATH_DATASET_TRACEBOT, 'debug')
     mesh_num_samples : int = 500
+    mask_grabcut_refinement : bool = True

@@ -227,7 +227,7 @@ def scene_optimization(logger, t_mag, isbop, scene_path, mask_path, scene_number
 
 
 def optimization_step(model, reference_rgb, reference_depth, reference_masks,
-                      optim_cfg, T_igt_list, debug_flag, debug_path, isbop):
+                      optim_cfg, T_igt_list, debug_flag, debug_path, isbop, viz_blend=0.4):
     # For visualization
     # iter_values = {"r": [], "t": [], "loss": [], "image_id": im_id}
     iter_values = {"r": [], "t": [], "loss": []}
@@ -269,10 +269,28 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks,
     best_metrics, best_metrics_str = metrics, metrics_str
     best_R_list, best_t_list = model.get_R_t()
 
-    reference_masks_tensors = [
-        torch.from_numpy(mask.astype(np.float32)).to(device)
+    ref_masks = [
+        torch.from_numpy(mask.astype(np.float32))
         for mask in reference_masks]
 
+    reference_rays = []
+    for mask in ref_masks:
+        indices_v, indices_u = torch.nonzero(mask, as_tuple=True)
+        x = (indices_u - model.renderer.intrinsics[0 ,2]) / model.renderer.intrinsics[0,0]
+        y = (indices_v - model.renderer.intrinsics[1,2]) / model.renderer.intrinsics[1,1]
+        z = torch.ones(x.shape)
+
+        l2_norm = torch.sqrt(x**2 + y**2 + 1.)
+        x /= l2_norm
+        y /= l2_norm
+        z /= l2_norm
+        reference_rays.append(
+            torch.cat([x[:, None],y[:, None],z[:, None]], dim=1).to(device))
+
+    ref_masks = [mask.to(device) for mask in ref_masks]
+
+    optim_images = []
+    mask_images = [[] for _ in reference_masks]
     pbar = tqdm(range(optim_cfg.max_iter))
     for i in pbar:
 
@@ -281,14 +299,21 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks,
         loss, losses_values, image_est, depth_est, obj_masks, fragments_est = model(
             reference_rgb,
             reference_depth,
-            reference_masks_tensors)  # Calling forward function
+            ref_masks,
+            reference_rays)  # Calling forward function
 
         loss.backward()
         optimizer.step()
 
         if debug_flag:
             out_np = K.utils.tensor_to_image(torch.movedim(image_est[..., :3], 3, 1))
-            plt.imshow(out_np); plt.savefig(os.path.join(debug_path, "optim{:05d}.png".format(i)))
+            blended = viz_blend * out_np + (1-viz_blend) * reference_rgb[...,::-1] / 255.
+            optim_images.append((255*blended).astype(np.uint8))
+
+            for mask_idx, (obj_mask, mask) in enumerate(zip(obj_masks, reference_masks)):
+                tmp_mask = obj_mask.detach().cpu().numpy().astype(float) - mask
+                mask_images[mask_idx].append(
+                    (255*(tmp_mask - tmp_mask.min()) / (tmp_mask.max() - tmp_mask.min()))[0].astype(np.uint8))
 
         pbar.set_description("LOSSES: {}".format(
             " | ".join([f"{name}: {np.array(loss_val).sum():.3f}"
@@ -297,6 +322,11 @@ def optimization_step(model, reference_rgb, reference_depth, reference_masks,
         # early stopping
         if loss.item() < scene_early_stopping_loss:
             break
+
+    if debug_flag:
+        imageio.mimsave(os.path.join(debug_path, "optim.gif"), optim_images, fps=5)
+        for obj_idx, obj_mask_images in enumerate(mask_images):
+            imageio.mimsave(os.path.join(debug_path, "mask-{}.gif".format(obj_idx)), obj_mask_images, fps=5)
 
     # record end and synchronize
     end.record()
