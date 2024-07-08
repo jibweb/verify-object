@@ -9,6 +9,7 @@ import yaml
 from pose.model import OptimizationModel
 import pose.object_pose as object_pose
 from collision.plane_detector import PlaneDetector
+from collision.point_clouds_utils import plane_pt_intersection_along_ray
 from contour.contour import compute_sdf_image
 from utility.logger import Logger
 from config import config
@@ -72,7 +73,7 @@ class VerifyPose:
 
         self.viz_pub = rospy.Publisher(f"{name}/debug_visualization", Image, queue_size=10, latch=True)
 
-        self.plane_model = None
+        self.plane_normal, self.plane_pt = None, None
 
         self.scale = self.camera_info.width // 640
         self.intrinsics = np.array(self.camera_info.K).reshape(3,3)
@@ -193,7 +194,7 @@ class VerifyPose:
         start.record()
 
         # Extract plane =======================================================
-        if self.plane_model is None:
+        if self.plane_normal is None:
             plane_det = PlaneDetector(
                 reference_width, reference_height,
                 to_meters=1e-3,
@@ -207,6 +208,11 @@ class VerifyPose:
 
             plane_depth = project_point_cloud(
                 plane, intrinsics, reference_height, reference_width)
+
+            self.plane_normal = torch.from_numpy(
+                plane_T[:,2][:3].astype(np.float32)).to(device)
+            self.plane_pt = torch.from_numpy(
+                np.asarray(plane.points[0].astype(np.float32))).to(device)
 
         # Filter detection based on depth =====================================
         perc_valid_depth_per_det = []
@@ -227,9 +233,6 @@ class VerifyPose:
         bounding_boxes = list(np.array(bounding_boxes)[valid_det_mask])
 
         self.publish_viz(rgb, scene_objects, bounding_boxes, init_poses, [0.5 for _ in scene_objects], intrinsics)
-
-        #TODO order detections (and cut out part of bounding box occluded by front detection)
-        #TODO filter supported objects?
 
         # Prepare target silhouettes ==========================================
         if len(goal.object_masks) == 0:
@@ -262,28 +265,37 @@ class VerifyPose:
             T_init_list,
             T_plane=torch.from_numpy(plane_T.astype(np.float32)))
 
-        # Check initial detections ============================================
-        # TODO: make this step conditional, whether the object is in hand or on plane
-        # and use plane model and mesh instead of depth
-        valid_silhouette_mask = np.ones(len(scene_objects), dtype=bool)
-        with torch.no_grad():
-            image_est, depth_est, obj_masks, fragments_est = self.model.renderer()
-            for mask_idx, obj_mask in enumerate(obj_masks):
-                ref_mask = torch.from_numpy(masks[mask_idx].astype(np.float32)).to(device)
-                union = ((obj_mask + ref_mask) > 0).float()
-                silhouette_loss = torch.sum(
-                    (obj_mask.float() - ref_mask)**2
-                ) / torch.sum(union)
-                if silhouette_loss > 0.9:
-                    valid_silhouette_mask[mask_idx] = False
+        # Correct poses to align with plane ===================================
+        for obj_idx, mask in enumerate(masks):
+            # Prepare meshes
+            rot, trans = T_init_list[obj_idx][:, :3, :3], T_init_list[obj_idx][:, :3, 3]
+            mesh = self.model.renderer.scene_meshes[obj_idx]
+            verts_trans = \
+                ((rot @ mesh.verts_padded()[..., None]) + trans[..., None])[..., 0]
 
-                # diff_z = det_mean_dist[mask_idx] - depth_est[obj_mask].mean()
-                # T_init_list[mask_idx][0, 2, 3] += diff_z
+            # Get mask coordinates
+            indices_v, indices_u = torch.nonzero(
+                torch.from_numpy(mask),
+                as_tuple=True)
 
-        scene_objects = list(np.array(scene_objects)[valid_silhouette_mask])
-        T_init_list = [pose for idx, pose in enumerate(T_init_list)
-                       if valid_silhouette_mask[idx]]
-        masks = list(np.array(masks)[valid_silhouette_mask])
+            # Convert mask pixels to rays
+            x = (indices_u - self.model.renderer.intrinsics[0 ,2]) / self.model.renderer.intrinsics[0,0]
+            y = (indices_v - self.model.renderer.intrinsics[1,2]) / self.model.renderer.intrinsics[1,1]
+            z = torch.ones(x.shape)
+
+            # Create average ray
+            ray = torch.Tensor(
+                [x[:, None].mean(), y[:, None].mean(), z[:, None].mean()]).to(device)
+
+            # Compute the difference to apply along ray to ensure plane contact
+            vec_to_plane = plane_pt_intersection_along_ray(
+                ray,
+                verts_trans[0],
+                self.plane_normal,
+                self.plane_pt)
+
+            # Adapt the initial pose
+            T_init_list[obj_idx][:, :3, 3] += vec_to_plane
 
         # Re-init the model with the corrected filtered poses
         self.model.init(

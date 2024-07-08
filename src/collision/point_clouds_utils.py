@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 
 def project_point_cloud(cloud, intrinsics, reference_height, reference_width):
@@ -13,15 +14,24 @@ def project_point_cloud(cloud, intrinsics, reference_height, reference_width):
     return depth_map
 
 
-def plane_line_intersection(rays, plane_normal, plane_pt):
-    # Choose the ray that has the smallest dot product
-    # to the plane normal (signed)
-    min_dot_prod_to_plane_idx = np.argmin(
-        np.dot((rays - plane_pt), plane_normal))
-    ray = rays[min_dot_prod_to_plane_idx]
-    ray /= np.linalg.norm(ray)
+def plane_pt_intersection_along_ray(ray, pts, plane_normal, plane_pt):
+    # pts = np.array(pts)
+    if len(pts.shape) == 2:
+        # Choose the ray that has the smallest dot product
+        # to the plane normal (signed)
+        closest_pt_idx = torch.argmin(
+            torch.einsum ('ij, j -> i', (pts - plane_pt), plane_normal))
+        closest_pt = pts[closest_pt_idx]
+    elif len(pts.shape) == 1:
+        assert pts.shape[0] == 3
+        closest_pt = pts
+    else:
+        raise Exception('Invalid shape of pts. Received {} but only accepts 1 dimension (a single 3D point) or 2 dimensions (an array of pts)'.format(pts.shape))
 
-    # Compute the corresponding intersection between plane and ray
-    t = np.dot(plane_normal, plane_pt) / np.dot(plane_normal, ray)
+    # Normalize ray
+    ray /= torch.linalg.vector_norm(ray)
 
-    return t*ray
+    # Compute the vector along `ray` to add to `closest_pt` to intersect with the plane
+    pt_to_plane_vec = torch.dot(plane_normal, plane_pt - closest_pt) / torch.dot(plane_normal, ray) * ray
+
+    return pt_to_plane_vec

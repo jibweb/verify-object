@@ -194,7 +194,7 @@ class OptimizationModel(nn.Module):
                     self.renderer.scene_transformed.faces_packed()]
             )[..., :MAX_FACE, :]
 
-            for ray_idx, ray in enumerate(ref_rays):
+            for ray_idx, rays in enumerate(ref_rays):
                 obj_face_mask = torch.logical_and(
                     valid_mask[..., :MAX_FACE],  # Only consider the 5 closest faces
                     obj_masks[ray_idx][..., None])
@@ -202,11 +202,11 @@ class OptimizationModel(nn.Module):
 
                 t = torch.einsum(
                     'ijkl,ijkl->ijk',
-                    ray[None,:,None,:],
+                    rays[None,:,None,:],
                     obj_pix_position[:,None,None,:])
 
                 pt_ray_distance = torch.norm(
-                    t*ray[None, ...] - obj_pix_position[:,None,:],
+                    t*rays[None, ...] - obj_pix_position[:,None,:],
                     # p=2,
                     dim=-1)
 
