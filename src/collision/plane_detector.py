@@ -1,6 +1,5 @@
-import numpy as np
-# from skimage.transform import resize
 import cv2
+import numpy as np
 import open3d as o3d
 
 
@@ -13,7 +12,7 @@ class PlaneDetector:
         self.to_meters = to_meters
         self.distance_threshold = distance_threshold
 
-    def detect(self, C, D, intrinsics, max_dist=1.0):
+    def create_point_cloud(self, C, D, intrinsics, max_dist=1.0):
         # adapt intrinsics
         cam_fx, cam_fy = intrinsics[0, 0], intrinsics[1, 1]
         cam_cx, cam_cy = intrinsics[0, 2], intrinsics[1, 2]
@@ -22,7 +21,8 @@ class PlaneDetector:
         pt2 = D * self.to_meters
         pt0 = (self.vmap - cam_cx) * pt2 / cam_fx
         pt1 = (self.umap - cam_cy) * pt2 / cam_fy
-        points = np.dstack((pt0, pt1, pt2, C)).astype(np.float32).reshape((self.width * self.height, 6))
+        points = np.dstack((pt0, pt1, pt2, C)).astype(np.float32)
+        points = points.reshape((self.width * self.height, 6))
 
         # remove invalid points
         z_values = pt2.reshape((self.width * self.height))
@@ -30,16 +30,29 @@ class PlaneDetector:
         if points.shape[0] == 0:
             raise ValueError("no points left to detect plane")
 
-        # === use Open3D for plane segmentation
         cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points[:, :3]))
         cloud.colors = o3d.utility.Vector3dVector(points[:, 3:6])
+
+        return cloud
+
+    def filter_plane(self, cloud, plane_normal, plane_pt):
+        points = np.asarray(cloud.points)
+        plane_distance = np.dot(points - plane_pt, plane_normal)
+        indices = np.nonzero(plane_distance < self.distance_threshold)[0]
+        plane = cloud.select_by_index(indices)
+        scene = cloud.select_by_index(indices, invert=True)
+
+        return plane, scene
+
+    def detect(self, cloud):
+        # === use Open3D for plane segmentation
         coefficients, indices = cloud.segment_plane(
             self.distance_threshold,
             ransac_n=3,
             num_iterations=1000)
-        plane, scene = cloud.select_by_index(indices), cloud.select_by_index(indices, invert=True)
+        plane = cloud.select_by_index(indices)
+        scene = cloud.select_by_index(indices, invert=True)
         # plane, scene = cloud.select_down_sample(indices), cloud.select_down_sample(indices, invert=True)  # open3d==0.9.0.0
-
 
         if len(coefficients) == 0:
             raise ValueError("no coefficients for plane - none detected")
@@ -64,6 +77,8 @@ class PlaneDetector:
         R[:, 2] = n[:3]
 
         # t: move -d in direction of n
+        points = np.asarray(cloud.points)
+
         t = -n * coefficients[3]
         centroid_in_plane = (R @ (points[:, :3]-t).T).T.mean(axis=0)
         centroid_in_plane[2] = 0  # only xy
@@ -74,4 +89,4 @@ class PlaneDetector:
         T[:3, :3] = R
         T[:3, 3] = t  # to mm
 
-        return T, plane, scene, cloud, indices
+        return T, plane, scene, indices

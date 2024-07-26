@@ -7,13 +7,12 @@ import torch.nn as nn
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
 from collision import transformations as tra
-from collision.point_clouds_utils import plane_contact_loss
+from collision.point_clouds_utils import plane_contact_loss, plane_pt_intersection_along_ray
 from contour import contour
 from pose.renderer import Renderer
 from pytorch3d.ops import interpolate_face_attributes
 
 import matplotlib.pyplot as plt
-import kornia as K
 
 
 class OptimizationModel(nn.Module):
@@ -32,7 +31,8 @@ class OptimizationModel(nn.Module):
         # Set up renderer
         self.renderer = Renderer(meshes, intrinsics, width, height, representation=cfg.pose_representation)
 
-    def init(self, scene_objects, T_init_list, plane_normal=None, plane_pt=None):
+    def init(self, scene_objects, T_init_list, masks,
+             plane_normal=None, plane_pt=None):
         # Init for rendering
         self.renderer.init(scene_objects, T_init_list)
 
@@ -43,8 +43,58 @@ class OptimizationModel(nn.Module):
         ]
 
         if plane_normal is not None and plane_pt is not None:
-            self.plane_normal = plane_normal
-            self.plane_pt = plane_pt
+            self.plane_normal = torch.from_numpy(plane_normal).to(device)
+            self.plane_pt = torch.from_numpy(plane_pt).to(device)
+
+        reference_rays = []
+        for obj_idx, mask in enumerate(masks):
+            # Convert mask pixels to rays
+            x,y,z = self.mask_to_rays(
+                torch.from_numpy(mask))
+
+            reference_rays.append(
+                torch.cat([x[:, None],y[:, None],z[:, None]], dim=1).to(device))
+
+            if plane_normal is not None and plane_pt is not None and self.cfg.plane_refinement:
+                # Create average ray
+                ray = torch.Tensor(
+                    [x[:, None].mean(), y[:, None].mean(), z[:, None].mean()]).to(device)
+
+                # Prepare meshes
+                rot, trans = T_init_list[obj_idx][:, :3, :3], T_init_list[obj_idx][:, :3, 3]
+                mesh = self.renderer.scene_meshes[obj_idx]
+                verts_trans = \
+                    ((rot @ mesh.verts_padded()[..., None]) + trans[..., None])[..., 0]
+
+                # Compute the difference to apply along ray to ensure plane contact
+                vec_to_plane = plane_pt_intersection_along_ray(
+                    ray,
+                    verts_trans[0],
+                    self.plane_normal,
+                    self.plane_pt)
+
+                # Adapt the initial pose
+                T_init_list[obj_idx][:, :3, 3] += vec_to_plane
+
+        if self.cfg.plane_refinement:
+            # Re-init the model with the corrected filtered poses
+            self.renderer.init_repr(T_init_list)
+
+        return reference_rays
+
+    def mask_to_rays(self, mask, normalize=True):
+        indices_v, indices_u = torch.nonzero(mask, as_tuple=True)
+        x = (indices_u - self.renderer.intrinsics[0 ,2]) / self.renderer.intrinsics[0,0]
+        y = (indices_v - self.renderer.intrinsics[1,2]) / self.renderer.intrinsics[1,1]
+        z = torch.ones(x.shape)
+
+        if normalize:
+            l2_norm = torch.sqrt(x**2 + y**2 + 1.)
+            x /= l2_norm
+            y /= l2_norm
+            z /= l2_norm
+
+        return x, y, z
 
     def signed_dis(self, k=10):
         """
@@ -197,7 +247,7 @@ class OptimizationModel(nn.Module):
 
             for ray_idx, rays in enumerate(ref_rays):
                 obj_face_mask = torch.logical_and(
-                    valid_mask[..., :MAX_FACE],  # Only consider the 5 closest faces
+                    valid_mask[..., :MAX_FACE],  # Only consider the MAX_FACE closest faces
                     obj_masks[ray_idx][..., None])
                 obj_pix_position = pix_position[obj_face_mask]
 

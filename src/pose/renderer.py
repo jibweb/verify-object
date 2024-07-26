@@ -96,15 +96,13 @@ class Renderer(nn.Module):
             self.scale_rotation = 10  # bigger impact of rotation st it's not dominated by translation
 
     def init(self, scene_objects, T_init_list): # TODO : Did I do it correctly here?
-        print('scene_objects', scene_objects)
-        if hasattr(self, 'scene_meshes'):
-            del self.scene_meshes
-
         self.scene_meshes = [
             self.meshes[object_name].clone().to(device)
             for object_name in scene_objects
         ]
+        self.init_repr(T_init_list)
 
+    def init_repr(self, T_init_list):
         if self.representation == 'se3':
             self.log_list = nn.Parameter(torch.stack([(se3_log_map(T_init)) for T_init in T_init_list]))
         elif self.representation == 'so3':

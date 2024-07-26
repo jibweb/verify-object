@@ -32,4 +32,5 @@ class OptimizationConfig(BaseConfig):
     optimizer_name: str = 'adam'
     max_iter: int = 50
     pose_representation : str = 'q'  # choices=['so3', 'se3', 'q'], help='q for [q, t], so3 for [so3_log(R), t] or se3 for se3_log([R, t])'
+    plane_refinement : bool = True
     losses : LossesConfig = field(default_factory=LossesConfig)
