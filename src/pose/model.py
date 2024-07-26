@@ -7,7 +7,7 @@ import torch.nn as nn
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
 from collision import transformations as tra
-from collision.environment import plane_collision_loss
+from collision.point_clouds_utils import plane_contact_loss
 from contour import contour
 from pose.renderer import Renderer
 from pytorch3d.ops import interpolate_face_attributes
@@ -32,7 +32,7 @@ class OptimizationModel(nn.Module):
         # Set up renderer
         self.renderer = Renderer(meshes, intrinsics, width, height, representation=cfg.pose_representation)
 
-    def init(self, scene_objects, T_init_list, T_plane=None):
+    def init(self, scene_objects, T_init_list, plane_normal=None, plane_pt=None):
         # Init for rendering
         self.renderer.init(scene_objects, T_init_list)
 
@@ -42,8 +42,9 @@ class OptimizationModel(nn.Module):
             for object_name in scene_objects
         ]
 
-        if T_plane is not None:
-            self.plane_T_matrix = T_plane.to(device)
+        if plane_normal is not None and plane_pt is not None:
+            self.plane_normal = plane_normal
+            self.plane_pt = plane_pt
 
     def signed_dis(self, k=10):
         """
@@ -227,16 +228,19 @@ class OptimizationModel(nn.Module):
             loss += signed_dis_loss * self.cfg.losses.collision_loss.weight
             losses_values['collision'] = signed_dis_loss.item()
 
-        if self.cfg.losses.plane_collision_loss.active and hasattr(self, 'plane_T_matrix'):
-            plane_col_loss, plane_cont_loss = plane_collision_loss(
-                self.scene_sampled_meshes,
-                self.renderer.get_transform(),
-                self.plane_T_matrix)
-            loss += plane_col_loss * self.cfg.losses.plane_collision_loss.weight
-            loss += plane_cont_loss * self.cfg.losses.plane_collision_loss.weight
-            losses_values['plane_col'] = plane_col_loss.item()
-            losses_values['plane_cont'] = plane_cont_loss.item()
+        if self.cfg.losses.plane_collision_loss.active and hasattr(self, 'plane_normal') and hasattr(self, 'plane_pt'):
+            # Create scene point cloud from models and poses
+            R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
+            points = torch.cat(self.scene_sampled_meshes, dim=0)  # (N, N_pts , 6 (coordinates and norms))
+            points_in_cam = (R @ points[..., :3, None])[..., 0] + t
 
+            plane_col_loss = plane_contact_loss(
+                points_in_cam,
+                self.plane_normal,
+                self.plane_pt)
+            loss += plane_col_loss * self.cfg.losses.plane_collision_loss.weight
+            losses_values['plane_loss'] = plane_col_loss.item()
+            # losses_values['plane_cont'] = plane_cont_loss.item()
 
         # Contour loss --------------------------------------------------------
         if self.cfg.losses.contour_loss.active:
