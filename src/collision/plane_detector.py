@@ -31,7 +31,7 @@ class PlaneDetector:
             raise ValueError("no points left to detect plane")
 
         cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points[:, :3]))
-        cloud.colors = o3d.utility.Vector3dVector(points[:, 3:6])
+        cloud.colors = o3d.utility.Vector3dVector(points[:, 3:6] / 255.)
 
         return cloud
 

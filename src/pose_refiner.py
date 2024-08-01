@@ -3,14 +3,19 @@ import cv2
 import imageio
 from matplotlib import pyplot as plt
 import numpy as np
+import open3d as o3d
 import os
+from pytorch3d.io import load_obj
+from pytorch3d.structures import Meshes
+from pytorch3d.renderer import TexturesVertex
 import sys
 import torch
 from tqdm import tqdm
+import trimesh
 import yaml
 
 from pose.model import OptimizationModel
-import pose.object_pose as object_pose
+# import pose.object_pose as object_pose
 from collision.plane_detector import PlaneDetector
 from collision.point_clouds_utils import plane_pt_intersection_along_ray
 # from contour.contour import compute_sdf_image
@@ -23,45 +28,56 @@ device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("
 torch.autograd.set_detect_anomaly(True)  # To check whether we have nan or inf in our gradient calculation
 
 
-INTERNAL_TO_PROJECT_NAMES = {
-    1: "MediumBottle",
-    2: "SmallBottle",
-    3: "Needle",
-    4: "NeedleCap",
-    5: "RedPlug",
-    6: "Canister",
-    7: "LargeBottle",
-    8: "YellowPlug",
-    9: "WhiteClamp",
-    10: "RedClamp",
-    # 'container': 'Canister',
-}
+def load_objects_models(object_names, objects_path, cmap=plt.cm.tab20(range(20)), mesh_num_samples=500, scale=1000):
+    meshes = {}
+    sampled_down_meshes = {}
+
+    for oi, object_name in enumerate(object_names):
+        # Load mesh
+        verts, faces_idx, _ = load_obj(os.path.join(objects_path, f'{object_name}.obj'))
+        textures = TexturesVertex(
+            verts_features=torch.from_numpy(cmap[oi][:3])[None, None, :]
+                                    .expand(-1, verts.shape[0], -1).type_as(verts))
+
+        mesh = Meshes(
+            verts=[verts/scale],
+            faces=[faces_idx.verts_idx],
+            textures=textures)
+
+        meshes[oi+1] = mesh
+
+        # Create a randomly point-normal set
+        # Same number of points for each individual object
+        mesh_sampled_down = trimesh.load(os.path.join(objects_path, f'{object_name}.obj'))
+        norms = mesh_sampled_down.face_normals
+        samples = trimesh.sample.sample_surface_even(mesh_sampled_down, mesh_num_samples) # either exactly NUM_samples, or <= NUM_SAMPLES --> pad by random.choice
+        samples_norms = norms[samples[1]] # Norms pointing out of the object
+        samples_point_norm = np.concatenate((np.asarray(samples[0]/scale), np.asarray(0-samples_norms)), axis=1)
+        if samples_point_norm.shape[0] < mesh_num_samples:  # NUM_SAMPLES not equal to mesh_num_samples -> padding
+            idx = np.random.choice(samples_point_norm.shape[0], mesh_num_samples - samples_point_norm.shape[0])
+            samples_point_norm = np.concatenate((samples_point_norm, samples_point_norm[idx]), axis=0)
+
+        sampled_down_meshes[oi+1] = torch.from_numpy(samples_point_norm.astype(np.float32))[None, ...]
+
+    return meshes, sampled_down_meshes
 
 
-PROJECT_TO_INTERNAL_NAMES = {
-    v: k for (k, v) in INTERNAL_TO_PROJECT_NAMES.items()
-}
-
-
-SUPPORTED_OBJECTS = INTERNAL_TO_PROJECT_NAMES.keys()
-
-
-class VerifyPose:
-    def __init__(self, cfg, intrinsics, objects_names, width, height,
+class RefinePose:
+    def __init__(self, cfg, intrinsics, objects_names, objects_to_optimize, width, height,
                  plane_normal=None, plane_pt=None, debug_flag=False):
         self.debug_flag = debug_flag
         self.plane_normal, self.plane_pt = plane_normal, plane_pt
+        self.cfg = cfg
 
-        self.scale = width // 320
+        self.scale = width // self.cfg.resolution
         self.intrinsics = intrinsics
         self.intrinsics[:2, :] /= self.scale
         print("Intrisics", self.intrinsics)
 
-        self.cfg = cfg
 
         # load all meshes that will be needed
         self.cmap = plt.cm.tab20(range(20)) # 20 different colors, two consecutive ones are similar (for two instances)
-        meshes, sampled_down_meshes = object_pose.load_objects_models(
+        meshes, sampled_down_meshes = load_objects_models(
             ["obj_{:06d}".format(obj_id) for obj_id in objects_names],
             cfg.objects_path,
             cmap=self.cmap,
@@ -74,6 +90,7 @@ class VerifyPose:
             self.intrinsics,
             width // self.scale,
             height // self.scale,
+            objects_to_optimize,
             cfg.optim,
             debug=self.debug_flag,
             debug_path=self.cfg.debug_path)
@@ -107,7 +124,8 @@ class VerifyPose:
 
         return refined_masks
 
-    def optimize(self, rgb, depth, scene_objects, init_poses, masks):
+    def optimize(self, rgb, depth, scene_objects,
+                 init_poses, masks):
         intrinsics = self.intrinsics.copy()
 
         if self.debug_flag:
@@ -188,11 +206,14 @@ class VerifyPose:
         # Set up optimization =================================================
         T_init_list = [torch.from_numpy(pose[None, ...]).to(device)
                      for pose in init_poses]
+        ref_masks = [
+            torch.from_numpy(mask.astype(np.float32)).to(device)
+            for mask in masks]
 
-        reference_rays = self.model.init(
+        self.model.init(
             scene_objects,
             T_init_list,
-            masks,
+            ref_masks,
             plane_normal=self.plane_normal,
             plane_pt=self.plane_pt)
 
@@ -208,32 +229,38 @@ class VerifyPose:
             #'adagrad': torch.optim.Adagrad,
             #'RMSprop': torch.optim.RMSprop,
             #'SGD': torch.optim.SGD,
-            #'LBFGS': torch.optim.LBFGS
+            # 'LBFGS': torch.optim.LBFGS
         }[self.cfg.optim.optimizer_name]
 
         optimizer = optimizer_type(
             self.model.parameters(), lr=self.cfg.optim.learning_rate)  # TODO try different optimizers
         best_R_list, best_t_list = self.model.get_R_t()
 
-        ref_masks = [
-            torch.from_numpy(mask.astype(np.float32))
-            for mask in masks]
-
-        ref_masks = [mask.to(device) for mask in ref_masks]
-
         optim_images = []
         mask_images = [[] for _ in masks]
         pbar = tqdm(range(self.cfg.optim.max_iter))
         for i in pbar:
-            optimizer.zero_grad()
-            loss, losses_values, image_est, depth_est, obj_masks, fragments_est = self.model(
-                rgb,
-                scene_depth,
-                ref_masks,
-                reference_rays)  # Calling forward function
+            if self.cfg.optim.optimizer_name == 'LBFGS':
+                def closure():
+                    optimizer.zero_grad()
+                    loss, losses_values, image_est, depth_est, obj_masks, fragments_est = self.model(
+                        rgb,
+                        scene_depth)  # Calling forward function
+                    loss.backward()
+                    return loss
 
-            loss.backward()
-            optimizer.step()
+                optimizer.step(closure)
+
+                loss, losses_values, image_est, depth_est, obj_masks, fragments_est = self.model(
+                    rgb,
+                    scene_depth)
+            else:
+                optimizer.zero_grad()
+                loss, losses_values, image_est, depth_est, obj_masks, fragments_est = self.model(
+                    rgb,
+                    scene_depth)  # Calling forward function
+                loss.backward()
+                optimizer.step()
 
             if self.debug_flag:
                 viz_blend = 0.4
@@ -241,6 +268,8 @@ class VerifyPose:
                 blended = viz_blend * out_np + (1-viz_blend) * rgb[...,::-1] / 255.
                 optim_images.append((255*blended).astype(np.uint8))
 
+                # for mask_idx, (obj_mask, mask) in enumerate(zip(obj_masks, self.model.ref_contour_masks)):
+                #     tmp_mask = obj_mask.detach().cpu().numpy().astype(float) - mask.detach().cpu().numpy()
                 for mask_idx, (obj_mask, mask) in enumerate(zip(obj_masks, masks)):
                     tmp_mask = obj_mask.detach().cpu().numpy().astype(float) - mask
                     mask_images[mask_idx].append(
@@ -273,10 +302,10 @@ class VerifyPose:
             pose[:3, 3] = best_t.to('cpu').detach().numpy()[0]
             predicted_poses.append(pose)
 
-        import open3d as o3d
-        pcd2 = o3d.geometry.PointCloud()
-        pcd2.points = o3d.utility.Vector3dVector(self.model.renderer.scene_transformed.verts_packed().detach().cpu().numpy())
-        o3d.visualization.draw_geometries([cloud, pcd2])
+        if self.debug_flag:
+            pcd2 = o3d.geometry.PointCloud()
+            pcd2.points = o3d.utility.Vector3dVector(self.model.renderer.scene_transformed.verts_packed().detach().cpu().numpy())
+            o3d.visualization.draw_geometries([cloud, pcd2])
 
         return predicted_poses, rgb, depth, masks
 

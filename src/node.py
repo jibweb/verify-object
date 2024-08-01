@@ -6,7 +6,7 @@ import torch
 from tqdm import tqdm
 import yaml
 
-from pose_verifier import VerifyPose
+from pose_refiner import RefinePose
 from config import config
 from matplotlib import pyplot as plt
 import cv2
@@ -36,16 +36,32 @@ INTERNAL_TO_PROJECT_NAMES = {
     # 'container': 'Canister',
 }
 
+OBJECTS_TO_OPTIMIZE = {
+    "MediumBottle": False,
+    "SmallBottle": False,
+    "Needle": True,
+    "NeedleCap": True,
+    "RedPlug": True,
+    "Canister": True,
+    "LargeBottle": False,
+    "YellowPlug": True,
+    "WhiteClamp": True,
+    "RedClamp": True,
+}
 
 PROJECT_TO_INTERNAL_NAMES = {
     v: k for (k, v) in INTERNAL_TO_PROJECT_NAMES.items()
 }
 
+OBJECTS_TO_OPTIMIZE_INTERNAL = {
+    PROJECT_TO_INTERNAL_NAMES[name]: val
+    for name, val in OBJECTS_TO_OPTIMIZE.items()
+}
 
 SUPPORTED_OBJECTS = INTERNAL_TO_PROJECT_NAMES.keys()
 
 
-class ROSPoseVerifier(VerifyPose):
+class ROSPoseVerifier(RefinePose):
 
     def __init__(self, name, cfg, debug_flag=False):
         # Reading camera intrinsics
@@ -65,6 +81,7 @@ class ROSPoseVerifier(VerifyPose):
             cfg=cfg, # TODO set from rosparam
             intrinsics=np.array(self.camera_info.K).reshape(3,3),
             objects_names=SUPPORTED_OBJECTS,
+            objects_to_optimize=OBJECTS_TO_OPTIMIZE_INTERNAL,
             width=self.camera_info.width,
             height=self.camera_info.height,
             debug_flag=debug_flag)
@@ -102,9 +119,7 @@ class ROSPoseVerifier(VerifyPose):
                 bounding_boxes, rgb.shape[0] // self.scale, rgb.shape[1] // self.scale)
 
         predicted_poses, ref_rgb, ref_depth, masks = super().optimize(
-            rgb, depth,
-            scene_objects, init_poses,
-            masks)
+            rgb, depth, scene_objects, init_poses, masks)
 
         self.publish_viz(
             ref_rgb, scene_objects, bounding_boxes, predicted_poses,
@@ -164,10 +179,16 @@ class ROSPoseVerifier(VerifyPose):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Tracebot project -- Pose refinement and verification using differentiable rendering')
+    parser.add_argument('--cfg', type=str)
     parser.add_argument('--debug', dest='debug', default=False, action='store_true')
     args = parser.parse_args()
 
     cfg = config.GlobalConfig()
+
+    if args.cfg:
+        with open(args.cfg) as fp:
+            params = yaml.safe_load(fp)
+        cfg.from_dict(params)
 
     rospy.init_node('verify_object')
     node = ROSPoseVerifier(

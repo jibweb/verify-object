@@ -7,8 +7,8 @@ import torch.nn as nn
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
 from collision import transformations as tra
-from collision.point_clouds_utils import plane_contact_loss, plane_pt_intersection_along_ray
-from contour import contour
+from collision.point_clouds_utils import plane_contact_loss, plane_pt_intersection_along_ray, point_ray_loss
+from contour import Sobel
 from pose.renderer import Renderer
 from pytorch3d.ops import interpolate_face_attributes
 
@@ -16,7 +16,8 @@ import matplotlib.pyplot as plt
 
 
 class OptimizationModel(nn.Module):
-    def __init__(self, meshes, sampled_meshes, intrinsics, width, height, cfg, debug=False, debug_path="/debug"):
+    def __init__(self, meshes, sampled_meshes, intrinsics, width, height,
+                 objects_to_optimize, cfg, debug=False, debug_path="/debug"):
         super().__init__()
         # self.meshes = meshes
         self.sampled_meshes = sampled_meshes
@@ -28,8 +29,12 @@ class OptimizationModel(nn.Module):
         self.meshes_diameter = None
         self.mask_sigma = 1e-4
 
+        self.sobel_filt = Sobel()
+
         # Set up renderer
-        self.renderer = Renderer(meshes, intrinsics, width, height, representation=cfg.pose_representation)
+        self.renderer = Renderer(
+            meshes, intrinsics, width, height, objects_to_optimize,
+            representation=cfg.pose_representation)
 
     def init(self, scene_objects, T_init_list, masks,
              plane_normal=None, plane_pt=None):
@@ -46,19 +51,32 @@ class OptimizationModel(nn.Module):
             self.plane_normal = torch.from_numpy(plane_normal).to(device)
             self.plane_pt = torch.from_numpy(plane_pt).to(device)
 
-        reference_rays = []
+        self.ref_masks = masks
+        self.ref_rays = []
+        self.ref_contour_masks = []
+        self.ref_contour_rays = []
         for obj_idx, mask in enumerate(masks):
             # Convert mask pixels to rays
-            x,y,z = self.mask_to_rays(
-                torch.from_numpy(mask))
+            x,y,z = self.mask_to_rays(mask)
 
-            reference_rays.append(
+            self.ref_rays.append(
                 torch.cat([x[:, None],y[:, None],z[:, None]], dim=1).to(device))
 
+            if self.cfg.losses.contour_loss.active:
+                # Convert contour mask to rays
+                contour = self.sobel_filt(mask[None, None, ...].float())[0,0] > 0
+                self.ref_contour_masks.append(contour)
+                x_cont, y_cont, z_cont = self.mask_to_rays(contour)
+                self.ref_contour_rays.append(
+                    torch.cat([x_cont[:, None],y_cont[:, None],z_cont[:, None]], dim=1).to(device))
+
             if plane_normal is not None and plane_pt is not None and self.cfg.plane_refinement:
+                # --- Align with supporting plane along mask rays -------------
                 # Create average ray
-                ray = torch.Tensor(
-                    [x[:, None].mean(), y[:, None].mean(), z[:, None].mean()]).to(device)
+                ray = torch.Tensor([
+                    x[:, None].mean(),
+                    y[:, None].mean(),
+                    z[:, None].mean()]).to(device)
 
                 # Prepare meshes
                 rot, trans = T_init_list[obj_idx][:, :3, :3], T_init_list[obj_idx][:, :3, 3]
@@ -80,13 +98,11 @@ class OptimizationModel(nn.Module):
             # Re-init the model with the corrected filtered poses
             self.renderer.init_repr(T_init_list)
 
-        return reference_rays
-
     def mask_to_rays(self, mask, normalize=True):
         indices_v, indices_u = torch.nonzero(mask, as_tuple=True)
         x = (indices_u - self.renderer.intrinsics[0 ,2]) / self.renderer.intrinsics[0,0]
         y = (indices_v - self.renderer.intrinsics[1,2]) / self.renderer.intrinsics[1,1]
-        z = torch.ones(x.shape)
+        z = torch.ones(x.shape, device=mask.device)
 
         if normalize:
             l2_norm = torch.sqrt(x**2 + y**2 + 1.)
@@ -225,7 +241,7 @@ class OptimizationModel(nn.Module):
     def get_R_t(self):
         return self.renderer.get_R_t()
 
-    def forward(self, ref_rgb, ref_depth, ref_masks, ref_rays):
+    def forward(self, ref_rgb, ref_depth):
         # Render the silhouette using the estimated pose
         image_est, depth_est, obj_masks, fragments_est = self.renderer()
 
@@ -234,8 +250,8 @@ class OptimizationModel(nn.Module):
 
         # Silhouette loss -----------------------------------------------------
         MAX_FACE = 5
-        if self.cfg.losses.silhouette_loss.active:
-            diff_rend_loss = torch.zeros(len(ref_masks)).to(device)
+        if self.cfg.losses.silhouette_loss.active or self.cfg.losses.contour_loss.active:
+            diff_rend_loss = torch.zeros(len(self.ref_masks)).to(device)
             # Mask for padded pixels.
             valid_mask = fragments_est.pix_to_face >= 0
             pix_position = interpolate_face_attributes(
@@ -245,26 +261,17 @@ class OptimizationModel(nn.Module):
                     self.renderer.scene_transformed.faces_packed()]
             )[..., :MAX_FACE, :]
 
-            for ray_idx, rays in enumerate(ref_rays):
+
+        if self.cfg.losses.silhouette_loss.active:
+            for ray_idx, rays in enumerate(self.ref_rays):
+                if not self.renderer.active_objects[ray_idx]:
+                    continue
                 obj_face_mask = torch.logical_and(
                     valid_mask[..., :MAX_FACE],  # Only consider the MAX_FACE closest faces
                     obj_masks[ray_idx][..., None])
                 obj_pix_position = pix_position[obj_face_mask]
 
-                t = torch.einsum(
-                    'ijkl,ijkl->ijk',
-                    rays[None,:,None,:],
-                    obj_pix_position[:,None,None,:])
-
-                pt_ray_distance = torch.norm(
-                    t*rays[None, ...] - obj_pix_position[:,None,:],
-                    # p=2,
-                    dim=-1)
-
-                closest_pt_to_rays = pt_ray_distance.min(dim=0).values.mean()
-                closest_ray_to_pts = pt_ray_distance.min(dim=1).values.mean()
-
-                diff_rend_loss[ray_idx] = (closest_pt_to_rays + closest_ray_to_pts) / 2
+                diff_rend_loss[ray_idx] = point_ray_loss(rays, obj_pix_position)
 
             # diff_rend_loss = torch.sum(diff_rend_loss)
             loss += torch.sum(diff_rend_loss) * self.cfg.losses.silhouette_loss.weight
@@ -282,7 +289,8 @@ class OptimizationModel(nn.Module):
             # Create scene point cloud from models and poses
             R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
             points = torch.cat(self.scene_sampled_meshes, dim=0)  # (N, N_pts , 6 (coordinates and norms))
-            points_in_cam = (R @ points[..., :3, None])[..., 0] + t
+            points_in_cam = torch.stack([
+                (rot_mat @ points[idx, :, :3, None])[..., 0] + t[idx] for idx, rot_mat in enumerate(R)])
 
             plane_col_loss = plane_contact_loss(
                 points_in_cam,
@@ -290,13 +298,27 @@ class OptimizationModel(nn.Module):
                 self.plane_pt)
             loss += plane_col_loss * self.cfg.losses.plane_collision_loss.weight
             losses_values['plane_loss'] = plane_col_loss.item()
-            # losses_values['plane_cont'] = plane_cont_loss.item()
 
         # Contour loss --------------------------------------------------------
         if self.cfg.losses.contour_loss.active:
-            contour_loss = torch.zeros(1).to(device)
-            loss += contour_loss * self.cfg.losses.contour_loss.weight
-            losses_values['contour'] = contour_loss.item()
+            contour_loss = torch.zeros(len(self.ref_masks)).to(device)
+
+            contour_masks = []
+            for ray_idx, rays in enumerate(self.ref_contour_rays):
+                if not self.renderer.active_objects[ray_idx]:
+                    continue
+                contour_mask = self.sobel_filt(obj_masks[ray_idx][None, ...].float())[0,0] > 0
+                contour_masks.append(contour_mask[None, ...])
+
+                obj_cont_face_mask = torch.logical_and(
+                    valid_mask[..., :MAX_FACE],  # Only consider the MAX_FACE closest faces
+                    contour_mask[..., None])
+                obj_cont_position = pix_position[obj_cont_face_mask]
+
+                contour_loss[ray_idx] = point_ray_loss(rays, obj_cont_position)
+
+            loss += torch.sum(contour_loss) * self.cfg.losses.contour_loss.weight
+            losses_values['contour'] = torch.sum(contour_loss).item()
 
         # Depth loss ----------------------------------------------------------
         if self.cfg.losses.depth_loss.active:
@@ -312,7 +334,10 @@ class OptimizationModel(nn.Module):
             loss += depth_loss * self.cfg.losses.depth_loss.weight
             losses_values['depth'] = depth_loss.item()
 
-        return loss, losses_values, image_est, depth_est, obj_masks, fragments_est
+        if self.cfg.losses.contour_loss.active:
+            return loss, losses_values, image_est, depth_est, contour_masks, fragments_est
+        else:
+            return loss, losses_values, image_est, depth_est, obj_masks, fragments_est
 
 
 def square_distance(pcd1, pcd2):

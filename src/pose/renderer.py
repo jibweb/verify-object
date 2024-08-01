@@ -23,10 +23,11 @@ import kornia as K
 
 
 class Renderer(nn.Module):
-    def __init__(self, meshes, intrinsics, width, height, representation='q'):
+    def __init__(self, meshes, intrinsics, width, height, objects_to_optimize, representation='q'):
         super().__init__()
         self.meshes = meshes
         self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
+        self.objects_to_optimize = objects_to_optimize
 
         # Plane (Table in this dataset) point clouds and transformation matrix
         self.plane_pcd = None
@@ -100,6 +101,12 @@ class Renderer(nn.Module):
             self.meshes[object_name].clone().to(device)
             for object_name in scene_objects
         ]
+
+        self.active_objects = [
+            self.objects_to_optimize[object_name]
+            for object_name in scene_objects
+        ]
+
         self.init_repr(T_init_list)
 
     def init_repr(self, T_init_list):
@@ -109,8 +116,12 @@ class Renderer(nn.Module):
             self.r_list = nn.Parameter(torch.stack([(so3_log_map(T_init[:, :3, :3])) for T_init in T_init_list]))
             self.t_list = nn.Parameter(torch.stack([(T_init[:, :3, 3]) for T_init in T_init_list]))
         elif self.representation == 'q':  # [q, t] representation
-            self.q_list = nn.Parameter(torch.stack([(matrix_to_quaternion(T_init[:, :3, :3])) for T_init in T_init_list])).to(self.device)
-            self.t_list = nn.Parameter(torch.stack([(T_init[:, :3, 3]) for T_init in T_init_list])).to(self.device)
+            self.q_list = nn.ParameterList([
+                nn.Parameter(matrix_to_quaternion(T_init[:, :3, :3]), requires_grad=is_active)
+                for T_init, is_active in zip(T_init_list, self.active_objects)]).to(self.device)
+            self.t_list = nn.ParameterList([
+                nn.Parameter(T_init[:, :3, 3], requires_grad=is_active)
+                for T_init, is_active in zip(T_init_list, self.active_objects)]).to(self.device)
         # elif self.representation == 'in-plane': # TODO: Check for in-plane how should this change ?
         #     # in this representation, we only update two delta values
         #     # - rz = in-plane z rotation, txy = in-plane xy translation

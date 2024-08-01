@@ -12,6 +12,7 @@ PATH_DATASET_TRACEBOT = "/data/"
 @dataclass
 class GlobalConfig(BaseConfig):
     optim: OptimizationConfig = field(default_factory=OptimizationConfig)
+    resolution : int = 640
     path_repo: str = '/'.join(os.path.dirname(__file__).split('/')[:-1])
     objects_path: str = os.path.join(PATH_DATASET_TRACEBOT, 'models')
     debug_path: str = os.path.join(PATH_DATASET_TRACEBOT, 'debug')

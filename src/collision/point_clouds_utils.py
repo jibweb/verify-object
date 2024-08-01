@@ -52,3 +52,20 @@ def plane_contact_loss(points, plane_normal, plane_pt, margin_col=0.01, margin_c
     target = torch.zeros(critical_pts.shape, device=device)
 
     return huber_func_col(mask_col * critical_pts, target) + huber_func_cont(mask_cont * critical_pts, target)
+
+
+def point_ray_loss(rays, positions):
+    t = torch.einsum(
+        'ijkl,ijkl->ijk',
+        rays[None,:,None,:],
+        positions[:,None,None,:])
+
+    pt_ray_distance = torch.norm(
+        t*rays[None, ...] - positions[:,None,:],
+        # p=2,
+        dim=-1)
+
+    closest_pt_to_rays = pt_ray_distance.min(dim=0).values.mean()
+    closest_ray_to_pts = pt_ray_distance.min(dim=1).values.mean()
+
+    return (closest_pt_to_rays + closest_ray_to_pts) / 2

@@ -28,9 +28,11 @@ class LossesConfig(BaseConfig):
 
 @dataclass
 class OptimizationConfig(BaseConfig):
-    learning_rate: float = 0.01
+    learning_rate: float = 0.005
     optimizer_name: str = 'adam'
-    max_iter: int = 50
+    # learning_rate: float = 0.01
+    # optimizer_name: str = 'LBFGS'
+    max_iter: int = 30
     pose_representation : str = 'q'  # choices=['so3', 'se3', 'q'], help='q for [q, t], so3 for [so3_log(R), t] or se3 for se3_log([R, t])'
     plane_refinement : bool = True
     losses : LossesConfig = field(default_factory=LossesConfig)
