@@ -1,0 +1,9 @@
+optim:
+    max_iter: 30
+    losses:
+        silhouette_loss:
+            active: true
+        plane_collision_loss:
+            active: true
+resolution: 320
+mask_grabcut_refinement : false

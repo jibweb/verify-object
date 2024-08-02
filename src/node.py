@@ -73,6 +73,12 @@ class ROSPoseVerifier(RefinePose):
 
         self.viz_pub = rospy.Publisher(f"{name}/debug_visualization", Image, queue_size=10, latch=True)
 
+        with open('/code/config/silhouette_plane.yml') as fp:
+            self.plane_params = yaml.safe_load(fp)
+        with open('/code/config/silhouette_contact.yml') as fp:
+            self.inhand_params = yaml.safe_load(fp)
+        cfg.from_dict(self.plane_params)
+
         # TODO get those values from rosparam
         # self.plane_normal, self.plane_pt = None, None
 
@@ -87,9 +93,27 @@ class ROSPoseVerifier(RefinePose):
             debug_flag=debug_flag)
 
         # Create server
-        self._server = SimpleActionServer(name, VerifyObjectAction, execute_cb=self.callback, auto_start=False)
+        self._server = SimpleActionServer(name, VerifyObjectAction, execute_cb=self.callback_plane, auto_start=False)
         self._server.start()
+
+        self._server_inhand = SimpleActionServer(name + '_inhand', VerifyObjectAction, execute_cb=self.callback_inhand, auto_start=False)
+        self._server_inhand.start()
+
         rospy.loginfo(f"[{name}] Action Server ready")
+
+    def callback_plane(self, goal):
+        self.cfg.from_dict(self.plane_params)
+        self.model.cfg = self.cfg.optim
+
+        result = self.generic_callback(goal)
+        self._server.set_succeeded(result)
+
+    def callback_inhand(self, goal):
+        self.cfg.from_dict(self.inhand_params)
+        self.model.cfg = self.cfg.optim
+
+        result = self.generic_callback(goal)
+        self._server_inhand.set_succeeded(result)
 
     def create_masks_from_bounding_boxes(self, bounding_boxes, height, width):
         masks = []
@@ -100,7 +124,7 @@ class ROSPoseVerifier(RefinePose):
 
         return masks
 
-    def callback(self, goal):
+    def generic_callback(self, goal):
         # Parse goal message ==================================================
         scene_objects = [PROJECT_TO_INTERNAL_NAMES[scene_obj]
             for scene_obj in goal.object_types]
@@ -150,7 +174,7 @@ class ROSPoseVerifier(RefinePose):
                                for name in scene_objects]
         result.confidences = [1. for _ in scene_objects]
 
-        self._server.set_succeeded(result)
+        return result
 
     def publish_viz(self, rgb, obj_names, bboxes, poses, scores, intrinsics):
         viz_img = rgb.copy()
@@ -179,16 +203,10 @@ class ROSPoseVerifier(RefinePose):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Tracebot project -- Pose refinement and verification using differentiable rendering')
-    parser.add_argument('--cfg', type=str)
     parser.add_argument('--debug', dest='debug', default=False, action='store_true')
     args = parser.parse_args()
 
     cfg = config.GlobalConfig()
-
-    if args.cfg:
-        with open(args.cfg) as fp:
-            params = yaml.safe_load(fp)
-        cfg.from_dict(params)
 
     rospy.init_node('verify_object')
     node = ROSPoseVerifier(

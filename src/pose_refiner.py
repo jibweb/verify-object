@@ -314,8 +314,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Pose refinement and verification using differentiable rendering')
     parser.add_argument('--debug', dest='debug', default=False, action='store_true')
+    parser.add_argument('--cfg', type=str)
     args = parser.parse_args()
 
     cfg = config.GlobalConfig()
+
+    if args.cfg:
+        with open(args.cfg) as fp:
+            params = yaml.safe_load(fp)
+        cfg.from_dict(params)
 
     # TODO
