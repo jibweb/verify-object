@@ -69,7 +69,7 @@ class RefinePose:
         self.plane_normal, self.plane_pt = plane_normal, plane_pt
         self.cfg = cfg
 
-        self.scale = width // self.cfg.resolution
+        self.scale = width / self.cfg.resolution
         self.intrinsics = intrinsics
         self.intrinsics[:2, :] /= self.scale
         print("Intrisics", self.intrinsics)
@@ -88,8 +88,8 @@ class RefinePose:
             meshes,
             sampled_down_meshes,
             self.intrinsics,
-            width // self.scale,
-            height // self.scale,
+            int(width / self.scale),
+            int(height / self.scale),
             objects_to_optimize,
             cfg.optim,
             debug=self.debug_flag,
@@ -134,12 +134,12 @@ class RefinePose:
 
         # Scale images ========================================================
         if self.scale != 1:
-            rgb = cv2.resize(rgb, (rgb.shape[1] // self.scale, rgb.shape[0] // self.scale))
-            depth = cv2.resize(depth, (depth.shape[1] // self.scale, depth.shape[0] // self.scale)) # TODO: check size to see if scaling is necessary
+            rgb = cv2.resize(rgb, (int(rgb.shape[1] / self.scale), int(rgb.shape[0] / self.scale)))
+            depth = cv2.resize(depth, (int(depth.shape[1] / self.scale), int(depth.shape[0] / self.scale))) # TODO: check size to see if scaling is necessary
             masks = [
                 cv2.resize(
                     mask.astype(np.float32),
-                    (mask.shape[1] // self.scale, mask.shape[0] // self.scale)
+                    (int(mask.shape[1] / self.scale), int(mask.shape[0] / self.scale))
                 ).astype(bool)
                 for mask in masks]
 
@@ -280,8 +280,22 @@ class RefinePose:
                             for name, loss_val in losses_values.items()])))
 
             # early stopping
+            iou_loss = torch.zeros(len(masks)).to(device)
+            for mask_idx, ref_mask in enumerate(self.model.ref_masks):
+                if not self.model.renderer.active_objects[mask_idx]:
+                    iou_loss[mask_idx] = 0.
+                    continue
+
+                union = ((obj_masks[mask_idx].float() + ref_mask) > 0).float()
+                iou_loss[mask_idx] = torch.sum(
+                    (obj_masks[mask_idx].float() - ref_mask)**2
+                ) / torch.sum(union) # Corresponds to 1 - IoU
+
             # if loss.item() < scene_early_stopping_loss:
-            #     break
+            iou = (1. - iou_loss).sum().item()
+            print(iou_loss)
+            if iou > len(masks) * self.cfg.iou_early_stopping:
+                break
 
         if self.debug_flag:
             imageio.mimsave(

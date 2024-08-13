@@ -18,3 +18,4 @@ class GlobalConfig(BaseConfig):
     debug_path: str = os.path.join(PATH_DATASET_TRACEBOT, 'debug')
     mesh_num_samples : int = 500
     mask_grabcut_refinement : bool = True
+    iou_early_stopping : float = 0.9
