@@ -34,10 +34,11 @@ class OptimizationModel(nn.Module):
         # Set up renderer
         self.renderer = Renderer(
             meshes, intrinsics, width, height, objects_to_optimize,
-            representation=cfg.pose_representation)
+            representation=cfg.pose_representation,
+            faces_per_pixel=cfg.faces_per_pixel)
 
     def init(self, scene_objects, T_init_list, masks,
-             plane_normal=None, plane_pt=None):
+             relative_pose=None, plane_normal=None, plane_pt=None):
         # Init for rendering
         self.renderer.init(scene_objects, T_init_list)
 
@@ -46,6 +47,9 @@ class OptimizationModel(nn.Module):
             self.sampled_meshes[object_name].clone().to(device)
             for object_name in scene_objects
         ]
+
+        if relative_pose is not None:
+            self.relative_pose = relative_pose
 
         if plane_normal is not None and plane_pt is not None:
             self.plane_normal = torch.from_numpy(plane_normal).to(device)
@@ -249,9 +253,8 @@ class OptimizationModel(nn.Module):
         losses_values = {}
 
         # Silhouette loss -----------------------------------------------------
-        MAX_FACE = 5
+        MAX_FACE = min(5,self.cfg.faces_per_pixel)
         if self.cfg.losses.silhouette_loss.active or self.cfg.losses.contour_loss.active:
-            diff_rend_loss = torch.zeros(len(self.ref_masks)).to(device)
             # Mask for padded pixels.
             valid_mask = fragments_est.pix_to_face >= 0
             pix_position = interpolate_face_attributes(
@@ -263,6 +266,7 @@ class OptimizationModel(nn.Module):
 
 
         if self.cfg.losses.silhouette_loss.active:
+            diff_rend_loss = torch.zeros(len(self.ref_masks)).to(device)
             for ray_idx, rays in enumerate(self.ref_rays):
                 if not self.renderer.active_objects[ray_idx]:
                     continue
@@ -276,6 +280,27 @@ class OptimizationModel(nn.Module):
             # diff_rend_loss = torch.sum(diff_rend_loss)
             loss += torch.sum(diff_rend_loss) * self.cfg.losses.silhouette_loss.weight
             losses_values['silhouette'] = torch.sum(diff_rend_loss).item()
+
+        # Contour loss --------------------------------------------------------
+        if self.cfg.losses.contour_loss.active:
+            contour_loss = torch.zeros(len(self.ref_masks)).to(device)
+
+            contour_masks = []
+            for ray_idx, rays in enumerate(self.ref_contour_rays):
+                if not self.renderer.active_objects[ray_idx]:
+                    continue
+                contour_mask = self.sobel_filt(obj_masks[ray_idx][None, ...].float())[0,0] > 0
+                contour_masks.append(contour_mask[None, ...])
+
+                obj_cont_face_mask = torch.logical_and(
+                    valid_mask[..., :MAX_FACE],  # Only consider the MAX_FACE closest faces
+                    contour_mask[..., None])
+                obj_cont_position = pix_position[obj_cont_face_mask]
+
+                contour_loss[ray_idx] = point_ray_loss(rays, obj_cont_position)
+
+            loss += torch.sum(contour_loss) * self.cfg.losses.contour_loss.weight
+            losses_values['contour'] = torch.sum(contour_loss).item()
 
         # Collision loss ------------------------------------------------------
         if self.cfg.losses.collision_loss.active:
@@ -299,27 +324,6 @@ class OptimizationModel(nn.Module):
             loss += plane_col_loss * self.cfg.losses.plane_collision_loss.weight
             losses_values['plane_loss'] = plane_col_loss.item()
 
-        # Contour loss --------------------------------------------------------
-        if self.cfg.losses.contour_loss.active:
-            contour_loss = torch.zeros(len(self.ref_masks)).to(device)
-
-            contour_masks = []
-            for ray_idx, rays in enumerate(self.ref_contour_rays):
-                if not self.renderer.active_objects[ray_idx]:
-                    continue
-                contour_mask = self.sobel_filt(obj_masks[ray_idx][None, ...].float())[0,0] > 0
-                contour_masks.append(contour_mask[None, ...])
-
-                obj_cont_face_mask = torch.logical_and(
-                    valid_mask[..., :MAX_FACE],  # Only consider the MAX_FACE closest faces
-                    contour_mask[..., None])
-                obj_cont_position = pix_position[obj_cont_face_mask]
-
-                contour_loss[ray_idx] = point_ray_loss(rays, obj_cont_position)
-
-            loss += torch.sum(contour_loss) * self.cfg.losses.contour_loss.weight
-            losses_values['contour'] = torch.sum(contour_loss).item()
-
         # Depth loss ----------------------------------------------------------
         if self.cfg.losses.depth_loss.active:
             ref_depth_tensor = torch.from_numpy(
@@ -333,6 +337,20 @@ class OptimizationModel(nn.Module):
             depth_loss = torch.sum(d_depth**2) / (d_depth.shape[0])
             loss += depth_loss * self.cfg.losses.depth_loss.weight
             losses_values['depth'] = depth_loss.item()
+
+        # Relative pose loss --------------------------------------------------
+        if self.cfg.losses.relative_pose_loss.active:
+            relative_pose_loss = torch.zeros(len(self.relative_pose)).to(device)
+            # Get pose of each object
+            R, t = self.get_R_t()
+            for idx, ((o1, o2), (ref_rot, ref_t)) in enumerate(self.relative_pose.items()):
+                relative_pose_loss[idx] +=  torch.acos((torch.trace((R[o2] @ R[o1].T) @ ref_rot) - 1.) / 2.)
+                relative_pose_loss[idx] +=  torch.sqrt(torch.pow((t[o1] - t[o2]) - ref_t, 2).sum())
+
+
+            loss += torch.sum(relative_pose_loss) * self.cfg.losses.relative_pose_loss.weight
+            losses_values['relative_pose'] = torch.sum(relative_pose_loss).item()
+
 
         if self.cfg.losses.contour_loss.active:
             return loss, losses_values, image_est, depth_est, contour_masks, fragments_est
