@@ -105,12 +105,21 @@ class ROSPoseVerifier(RefinePose):
         self.cfg.from_dict(self.plane_params)
         self.model.cfg = self.cfg.optim
 
+        # TODO: re-initialize renderer appropriately
+
         result = self.generic_callback(goal)
         self._server.set_succeeded(result)
 
     def callback_inhand(self, goal):
         self.cfg.from_dict(self.inhand_params)
         self.model.cfg = self.cfg.optim
+
+        # TODO: re-initialize renderer appropriately
+
+        # TODO: Obtain poses from DT ?
+        # TODO: Obtain masks from Yolov8 somehow (filtered only for hand result)
+        # TODO: Obtain contact points information
+        # TODO: Add gripper CAD in the scene
 
         result = self.generic_callback(goal)
         self._server_inhand.set_succeeded(result)
