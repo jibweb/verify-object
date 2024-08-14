@@ -106,5 +106,6 @@ RUN chmod +x /ros_entrypoint_noetic.sh
 RUN /bin/bash -c 'conda init'
 
 ENTRYPOINT ["/ros_entrypoint_noetic.sh"]
+CMD ["conda", "run", "--no-capture-output", "-n", "pytorch3d", "python", "code/node.py"]
 # docker run -it --rm --gpus all -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix:rw -v /home/jbweibel/code/inverse_rendering/negar-layegh-inverse-rendering:/home -v "/home/jbweibel/dataset/Tracebot/Tracebot_Negar_2022_08_04":"/home/jbweibel/dataset/Tracebot/Tracebot_Negar_2022_08_04" diffrend bash
 # cd /home && conda run -n pytorch3d python src/main.py
