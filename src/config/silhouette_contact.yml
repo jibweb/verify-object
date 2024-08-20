@@ -5,5 +5,5 @@ optim:
             active: true
         plane_collision_loss:
             active: false
-resolution: 320
+resolution: 480
 mask_grabcut_refinement : false

@@ -69,12 +69,6 @@ class RefinePose:
         self.plane_normal, self.plane_pt = plane_normal, plane_pt
         self.cfg = cfg
 
-        self.scale = width / self.cfg.resolution
-        self.intrinsics = intrinsics
-        self.intrinsics[:2, :] /= self.scale
-        print("Intrisics", self.intrinsics)
-
-
         # load all meshes that will be needed
         self.cmap = plt.cm.tab20(range(20)) # 20 different colors, two consecutive ones are similar (for two instances)
         meshes, sampled_down_meshes = load_objects_models(
@@ -82,6 +76,15 @@ class RefinePose:
             cfg.objects_path,
             cmap=self.cmap,
             mesh_num_samples=cfg.mesh_num_samples)
+
+        self.init(cfg, intrinsics, meshes, sampled_down_meshes, objects_to_optimize, width, height)
+
+    def init(self, cfg, intrinsics, meshes, sampled_down_meshes,
+             objects_to_optimize, width, height):
+        self.scale = width / self.cfg.resolution
+        self.intrinsics = intrinsics
+        self.intrinsics[:2, :] /= self.scale
+        print("Intrisics", self.intrinsics)
 
         # Optimization model
         self.model = OptimizationModel(

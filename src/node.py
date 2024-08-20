@@ -77,6 +77,8 @@ class ROSPoseVerifier(RefinePose):
             self.plane_params = yaml.safe_load(fp)
         with open('/code/config/silhouette_contact.yml') as fp:
             self.inhand_params = yaml.safe_load(fp)
+
+        assert self.plane_params['resolution'] == self.inhand_params['resolution'], "In-hand and on-plane configuration must use the same resolution"
         cfg.from_dict(self.plane_params)
 
         # TODO get those values from rosparam
