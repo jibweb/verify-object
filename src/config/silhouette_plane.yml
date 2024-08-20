@@ -1,3 +1,4 @@
+iou_early_stopping: 0.9
 optim:
     max_iter: 30
     losses:

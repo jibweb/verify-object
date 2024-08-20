@@ -189,7 +189,7 @@ class OptimizationModel(nn.Module):
             R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
             points = torch.cat(self.scene_sampled_meshes, dim=0)  # (N, N_pts , 6 (coordinates and norms))
             points_in_cam = torch.stack([
-                (rot_mat @ points[idx, :, :3, None])[..., 0] + t[idx] for idx, rot_mat in enumerate(R)])
+                (rot_mat @ points[idx, :, :3, None])[..., 0] + t[idx] for idx, rot_mat in enumerate(R)])  # (N, N_pts, 3)
 
             plane_col_loss = plane_contact_loss(
                 points_in_cam,

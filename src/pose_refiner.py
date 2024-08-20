@@ -272,8 +272,7 @@ class RefinePose:
 
             # if loss.item() < scene_early_stopping_loss:
             iou = (1. - iou_loss).sum().item()
-            print(iou_loss)
-            if iou > len(masks) * self.cfg.iou_early_stopping:
+            if iou > sum(self.model.renderer.active_objects) * self.cfg.iou_early_stopping:
                 break
 
         if self.debug_flag:
