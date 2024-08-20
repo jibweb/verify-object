@@ -1,0 +1,13 @@
+<launch>
+   <arg name="static" default="false"/>
+   <arg name="output" default="screen"/>
+
+   <arg name="robot_setup" default="astech"/>
+   <env name="ROBOT_SETUP" value="$(arg robot_setup)" />
+
+  <node pkg="verifyobject" type="start_container.sh" name="start_container" output="$(arg output)" args="verify_object_static"
+    if="$(arg static)"/>
+  <node pkg="verifyobject" type="start_container.sh" name="start_container" output="$(arg output)" args="verify_object"
+    unless="$(arg static)"/>
+
+</launch>
