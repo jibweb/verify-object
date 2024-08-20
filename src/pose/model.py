@@ -38,7 +38,8 @@ class OptimizationModel(nn.Module):
             faces_per_pixel=cfg.faces_per_pixel)
 
     def init(self, scene_objects, T_init_list, masks,
-             relative_pose=None, plane_normal=None, plane_pt=None):
+             relative_pose=None, point_contacts=None,
+             plane_normal=None, plane_pt=None):
         # Init for rendering
         self.renderer.init(scene_objects, T_init_list)
 
@@ -50,6 +51,9 @@ class OptimizationModel(nn.Module):
 
         if relative_pose is not None:
             self.relative_pose = relative_pose
+
+        if point_contacts is not None:
+            self.point_contacts = point_contacts
 
         if plane_normal is not None and plane_pt is not None:
             self.plane_normal = torch.from_numpy(plane_normal).to(device)
@@ -126,7 +130,7 @@ class OptimizationModel(nn.Module):
         loss = torch.zeros(1).to(device)
         losses_values = {}
 
-        # Silhouette loss -----------------------------------------------------
+        # === SETUP ===========================================================
         MAX_FACE = min(5,self.cfg.faces_per_pixel)
         if self.cfg.losses.silhouette_loss.active or self.cfg.losses.contour_loss.active:
             # Mask for padded pixels.
@@ -138,7 +142,16 @@ class OptimizationModel(nn.Module):
                     self.renderer.scene_transformed.faces_packed()]
             )[..., :MAX_FACE, :]
 
+        if (self.cfg.losses.point_contact_loss and hasattr(self, 'point_contact')) or \
+           (self.cfg.losses.plane_collision_loss.active and hasattr(self, 'plane_normal') and hasattr(self, 'plane_pt')):
+            # Create scene point cloud from models and poses
+            R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
+            points = torch.cat(self.scene_sampled_meshes, dim=0)  # (N, N_pts , 6 (coordinates and norms))
+            points_in_cam = torch.stack([
+                (rot_mat @ points[idx, :, :3, None])[..., 0] + t[idx] for idx, rot_mat in enumerate(R)])  # (N, N_pts, 3)
 
+        # === LOSSES ==========================================================
+        # Silhouette loss -----------------------------------------------------
         if self.cfg.losses.silhouette_loss.active:
             diff_rend_loss = torch.zeros(len(self.ref_masks)).to(device)
             for ray_idx, rays in enumerate(self.ref_rays):
@@ -178,19 +191,20 @@ class OptimizationModel(nn.Module):
 
         # Collision loss ------------------------------------------------------
         if self.cfg.losses.collision_loss.active:
-            # Calculating the signed distance
-            signed_dis, intersect_point = self.signed_dis()
-            signed_dis_loss = torch.max(signed_dis)
-            loss += signed_dis_loss * self.cfg.losses.collision_loss.weight
-            losses_values['collision'] = signed_dis_loss.item()
+            # TODO: collision_loss finish implementation
+            print('Object collision loss not implemented')
+            # losses_values['collision'] = .item()
 
+        # Point contact loss ------------------------------------------------
+        if (self.cfg.losses.point_contact_loss and hasattr(self, 'point_contact')):
+            # TODO: point_contact_loss test implentation
+            distances = torch.cdist(points_in_cam, self.point_contacts) # (N, N_pts, 3) and (N, N_objcontact, 3) -> (N, N_pts, N_objcontact)
+            dist_to_closest_obj_pt = distances.min(dim=1).values  # (N, N_objcontact)
+            loss += torch.sum(dist_to_closest_obj_pt) * self.cfg.point_contact_loss.weight
+            losses_values['point_contact'] = torch.sum(dist_to_closest_obj_pt).item()
+
+        # Plane collision loss ------------------------------------------------
         if self.cfg.losses.plane_collision_loss.active and hasattr(self, 'plane_normal') and hasattr(self, 'plane_pt'):
-            # Create scene point cloud from models and poses
-            R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
-            points = torch.cat(self.scene_sampled_meshes, dim=0)  # (N, N_pts , 6 (coordinates and norms))
-            points_in_cam = torch.stack([
-                (rot_mat @ points[idx, :, :3, None])[..., 0] + t[idx] for idx, rot_mat in enumerate(R)])  # (N, N_pts, 3)
-
             plane_col_loss = plane_contact_loss(
                 points_in_cam,
                 self.plane_normal,
@@ -200,6 +214,7 @@ class OptimizationModel(nn.Module):
 
         # Depth loss ----------------------------------------------------------
         if self.cfg.losses.depth_loss.active:
+            # TODO: depth_loss finish implementation
             ref_depth_tensor = torch.from_numpy(
                 ref_depth.astype(np.float32)).to(device)
             # ref_depth_tensor *= (self.image_ref[..., 0] > 0).float()
@@ -214,6 +229,7 @@ class OptimizationModel(nn.Module):
 
         # Relative pose loss --------------------------------------------------
         if self.cfg.losses.relative_pose_loss.active:
+            # TODO: relative_pose_loss finish implementation
             relative_pose_loss = torch.zeros(len(self.relative_pose)).to(device)
             # Get pose of each object
             R, t = self.get_R_t()

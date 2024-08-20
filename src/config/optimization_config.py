@@ -23,6 +23,8 @@ class LossesConfig(BaseConfig):
         default_factory=lambda: LossConfig(active=False, early_stopping_loss=0.03))
     plane_collision_loss : LossConfig = field(
         default_factory=lambda: LossConfig(active=False, early_stopping_loss=0.03))
+    point_contact_loss : LossConfig = field(
+        default_factory=lambda: LossConfig(active=False, early_stopping_loss=0.03))
     depth_loss : LossConfig = field(
         default_factory=lambda: LossConfig(active=False, early_stopping_loss=0.7))
     relative_pose_loss : LossConfig = field(
