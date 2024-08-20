@@ -168,26 +168,6 @@ class RefinePose:
         if self.debug_flag:
             plt.imshow(scene_depth); plt.savefig(os.path.join(self.cfg.debug_path, "ref_depth.png"))
 
-        # Filter detection based on depth =====================================
-        # perc_valid_depth_per_det = []
-        # det_mean_dist = []
-        # for bbox in bounding_boxes:
-        #     bbox_depth = scene_depth[bbox[1]:bbox[3], bbox[0]:bbox[2]]
-        #     # print("Bboxes & depth", bbox, bbox_depth)
-        #     perc_valid_depth_per_det.append(
-        #         np.mean(bbox_depth != 0))
-        #     det_mean_dist.append(np.mean(bbox_depth[bbox_depth != 0]))
-
-        # valid_det_mask = np.array(perc_valid_depth_per_det) > 0.1
-
-        # print("valid_det_mask", valid_det_mask)
-
-        # scene_objects = list(np.array(scene_objects)[valid_det_mask])
-        # init_poses = list(np.array(init_poses)[valid_det_mask])
-        # bounding_boxes = list(np.array(bounding_boxes)[valid_det_mask])
-        # if len(goal.object_masks) != 0:
-        #     masks = list(np.array(masks)[valid_det_mask])
-
         # Prepare target silhouettes ==========================================
         if self.cfg.mask_grabcut_refinement:
             masks = self.refine_masks_with_grabcut(rgb, masks)
@@ -201,7 +181,6 @@ class RefinePose:
             cv2.imwrite(os.path.join(self.cfg.debug_path, "ref_mask.png"),
                         (0.7*255*reference_mask + 0.3*rgb).astype(np.uint8))
             cv2.imwrite(os.path.join(self.cfg.debug_path, "ref_rgb.png"), rgb)
-
 
         # Set up optimization =================================================
         T_init_list = [torch.from_numpy(pose[None, ...]).to(device)
