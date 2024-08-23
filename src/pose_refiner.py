@@ -244,12 +244,12 @@ class RefinePose:
                 loss.backward()
                 optimizer.step()
 
-            if self.debug_flag:
-                viz_blend = 0.4
+            if self.debug_flag or i == (self.cfg.optim.max_iter - 1):
                 out_np = image_est[..., :3].cpu().detach().squeeze().numpy()
-                blended = viz_blend * out_np + (1-viz_blend) * rgb[...,::-1] / 255.
+                blended = self.cfg.viz_blend * out_np + (1-self.cfg.viz_blend) * rgb[...,::-1] / 255.
                 optim_images.append((255*blended).astype(np.uint8))
 
+            if self.debug_flag:
                 # for mask_idx, (obj_mask, mask) in enumerate(zip(obj_masks, self.model.ref_contour_masks)):
                 #     tmp_mask = obj_mask.detach().cpu().numpy().astype(float) - mask.detach().cpu().numpy()
                 for mask_idx, (obj_mask, mask) in enumerate(zip(obj_masks, masks)):
@@ -276,6 +276,10 @@ class RefinePose:
             # if loss.item() < scene_early_stopping_loss:
             iou = (1. - iou_loss).sum().item()
             if iou > sum(self.model.renderer.active_objects) * self.cfg.iou_early_stopping:
+                if not self.debug_flag:
+                    out_np = image_est[..., :3].cpu().detach().squeeze().numpy()
+                    blended = self.cfg.viz_blend * out_np + (1-self.cfg.viz_blend) * rgb[...,::-1] / 255.
+                    optim_images.append((255*blended).astype(np.uint8))
                 break
 
         if self.debug_flag:
@@ -289,6 +293,7 @@ class RefinePose:
                         "mask-{}.gif".format(obj_idx)),
                     obj_mask_images, fps=5)
 
+        # TODO: it does an extra opt.step between the 3d viz and the returned R_t
         best_R_list, best_t_list = self.model.get_R_t()
         predicted_poses = []
         for best_R, best_t in zip(best_R_list, best_t_list):
@@ -302,7 +307,7 @@ class RefinePose:
             pcd2.points = o3d.utility.Vector3dVector(self.model.renderer.scene_transformed.verts_packed().detach().cpu().numpy())
             o3d.visualization.draw_geometries([cloud, pcd2])
 
-        return predicted_poses, rgb, depth, masks
+        return predicted_poses, rgb, depth, masks, optim_images[-1]
 
 
 if __name__ == "__main__":
@@ -319,4 +324,4 @@ if __name__ == "__main__":
             params = yaml.safe_load(fp)
         cfg.from_dict(params)
 
-    # TODO
+    # TODO: process data in 3d-dat format

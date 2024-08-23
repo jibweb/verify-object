@@ -19,3 +19,5 @@ class GlobalConfig(BaseConfig):
     mesh_num_samples : int = 500
     mask_grabcut_refinement : bool = True
     iou_early_stopping : float = 0.9
+    viz_blend : float = 0.4
+

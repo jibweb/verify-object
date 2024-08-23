@@ -153,12 +153,10 @@ class ROSPoseVerifier(RefinePose):
             masks = self.create_masks_from_bounding_boxes(
                 bounding_boxes, rgb.shape[0] // self.scale, rgb.shape[1] // self.scale)
 
-        predicted_poses, ref_rgb, ref_depth, masks = super().optimize(
+        predicted_poses, ref_rgb, ref_depth, masks, viz_img = super().optimize(
             rgb, depth, scene_objects, init_poses, masks)
 
-        self.publish_viz(
-            ref_rgb, scene_objects, bounding_boxes, predicted_poses,
-            [0.5 for _ in scene_objects], self.intrinsics)
+        self.publish_viz(viz_img)
 
         result = VerifyObjectResult()
         result.object_poses = [
@@ -187,25 +185,8 @@ class ROSPoseVerifier(RefinePose):
 
         return result
 
-    def publish_viz(self, rgb, obj_names, bboxes, poses, scores, intrinsics):
-        viz_img = rgb.copy()
-
-        for bbox in bboxes:
-            cv2.rectangle(viz_img,
-                        (int(bbox[0]), int(bbox[1])),
-                        (int(bbox[2]), int(bbox[3])), (0, 255, 0), 2)
-
-        for o_idx, obj_pose in enumerate(poses):
-            rospy.loginfo("{}: {}".format(obj_names[o_idx], scores[o_idx]))
-            rospy.loginfo("{}".format(obj_pose))
-
-            rvec, _ = cv2.Rodrigues(obj_pose[:3, :3])
-            cv2.drawFrameAxes(viz_img,
-                              intrinsics,
-                              np.zeros(5),
-                              rvec, obj_pose[:3, 3], 0.08)
-
-
+    def publish_viz(self, rgb):
+        viz_img = rgb[:,:,::-1].copy()
         data = ros_numpy.msgify(Image, viz_img, encoding='8UC3')
         data.header.frame_id = self.camera_info.header.frame_id
         data.header.stamp = self.camera_info.header.stamp
