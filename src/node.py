@@ -81,8 +81,12 @@ class ROSPoseVerifier(RefinePose):
         assert self.plane_params['resolution'] == self.inhand_params['resolution'], "In-hand and on-plane configuration must use the same resolution"
         cfg.from_dict(self.plane_params)
 
-        # TODO get those values from rosparam
-        # self.plane_normal, self.plane_pt = None, None
+        plane_normal = np.array(
+            rospy.get_param('/locateobject/plane_normal', []))
+        if len(plane_normal) != 0:
+            plane_normal /= np.linalg.norm(plane_normal)
+        plane_pt = np.array(
+            rospy.get_param('/locateobject/plane_pt', []))
 
         print("Pre-scaling Intrisics", np.array(self.camera_info.K).reshape(3,3))
         super().__init__(
@@ -92,6 +96,8 @@ class ROSPoseVerifier(RefinePose):
             objects_to_optimize=OBJECTS_TO_OPTIMIZE_INTERNAL,
             width=self.camera_info.width,
             height=self.camera_info.height,
+            plane_normal=plane_normal if len(plane_normal) != 0 else None,
+            plane_pt=plane_pt if len(plane_pt) != 0 else None,
             debug_flag=debug_flag)
 
         # Create server
