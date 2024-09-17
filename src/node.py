@@ -82,11 +82,11 @@ class ROSPoseVerifier(RefinePose):
         cfg.from_dict(self.plane_params)
 
         plane_normal = np.array(
-            rospy.get_param('/locateobject/plane_normal', []))
+            rospy.get_param('/locateobject/plane_normal', []), dtype=np.float32)
         if len(plane_normal) != 0:
             plane_normal /= np.linalg.norm(plane_normal)
         plane_pt = np.array(
-            rospy.get_param('/locateobject/plane_pt', []))
+            rospy.get_param('/locateobject/plane_pt', []), dtype=np.float32)
 
         print("Pre-scaling Intrisics", np.array(self.camera_info.K).reshape(3,3))
         super().__init__(
