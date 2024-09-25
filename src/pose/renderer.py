@@ -161,7 +161,7 @@ class Renderer(nn.Module):
             T_list.append(T)
         return T_list
 
-    def forward(self, max_scene_depth=4):
+    def forward(self, max_scene_depth=4.):
         # Render the silhouette using the estimated pose
         R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
 
@@ -185,10 +185,11 @@ class Renderer(nn.Module):
                 T=torch.zeros((1, 3)).to(device))
 
             zbuf = self.fragments_est.zbuf # (N, h, w, k ) where N in as_scene = 1
-            image_depth_est = torch.where(zbuf >= 0, zbuf, max_scene_depth)
+
+            image_depth_est = torch.where(zbuf >= 0, zbuf, torch.tensor(max_scene_depth, dtype=torch.float, device=device))
             image_depth_est, depth_indices = image_depth_est.min(-1)
             image_depth_est = torch.where(
-                image_depth_est != max_scene_depth, image_depth_est, 0.)
+                image_depth_est != max_scene_depth, image_depth_est, torch.tensor(0., dtype=torch.float, device=device))
 
             pix_to_close_face = self.fragments_est.pix_to_face[..., 0]
             obj_masks = []

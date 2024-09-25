@@ -53,7 +53,7 @@ class OptimizationModel(nn.Module):
             self.relative_pose = relative_pose
 
         if point_contacts is not None:
-            self.point_contacts = point_contacts
+            self.point_contacts = torch.from_numpy(point_contacts).to(device)
 
         if plane_normal is not None and plane_pt is not None:
             self.plane_normal = torch.from_numpy(plane_normal).to(device)
@@ -142,7 +142,7 @@ class OptimizationModel(nn.Module):
                     self.renderer.scene_transformed.faces_packed()]
             )[..., :MAX_FACE, :]
 
-        if (self.cfg.losses.point_contact_loss and hasattr(self, 'point_contact')) or \
+        if (self.cfg.losses.point_contact_loss and hasattr(self, 'point_contacts')) or \
            (self.cfg.losses.plane_collision_loss.active and hasattr(self, 'plane_normal') and hasattr(self, 'plane_pt')):
             # Create scene point cloud from models and poses
             R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
@@ -162,7 +162,14 @@ class OptimizationModel(nn.Module):
                     obj_masks[ray_idx][..., None])
                 obj_pix_position = pix_position[obj_face_mask]
 
-                diff_rend_loss[ray_idx] = point_ray_loss(rays, obj_pix_position)
+                if len(obj_pix_position) == 0:
+                    print("WARNING: object mesh {} outside of camera frustum".format(
+                        ray_idx))
+                    zero_loss = torch.tensor(0.)
+                    zero_loss.requires_grad_()
+                    diff_rend_loss[ray_idx] = zero_loss
+                else:
+                    diff_rend_loss[ray_idx] = point_ray_loss(rays, obj_pix_position)
 
             # diff_rend_loss = torch.sum(diff_rend_loss)
             loss += torch.sum(diff_rend_loss) * self.cfg.losses.silhouette_loss.weight
@@ -196,12 +203,12 @@ class OptimizationModel(nn.Module):
             # losses_values['collision'] = .item()
 
         # Point contact loss ------------------------------------------------
-        if (self.cfg.losses.point_contact_loss and hasattr(self, 'point_contact')):
+        if (self.cfg.losses.point_contact_loss.active and hasattr(self, 'point_contacts')):
             # TODO: point_contact_loss test implentation
             distances = torch.cdist(points_in_cam, self.point_contacts) # (N, N_pts, 3) and (N, N_objcontact, 3) -> (N, N_pts, N_objcontact)
             dist_to_closest_obj_pt = distances.min(dim=1).values  # (N, N_objcontact)
-            loss += torch.sum(dist_to_closest_obj_pt) * self.cfg.point_contact_loss.weight
-            losses_values['point_contact'] = torch.sum(dist_to_closest_obj_pt).item()
+            loss += torch.mean(dist_to_closest_obj_pt) * self.cfg.losses.point_contact_loss.weight
+            losses_values['point_contact'] = torch.mean(dist_to_closest_obj_pt).item()
 
         # Plane collision loss ------------------------------------------------
         if self.cfg.losses.plane_collision_loss.active and hasattr(self, 'plane_normal') and hasattr(self, 'plane_pt'):

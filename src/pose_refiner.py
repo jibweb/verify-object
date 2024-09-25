@@ -128,7 +128,7 @@ class RefinePose:
         return refined_masks
 
     def optimize(self, rgb, depth, scene_objects,
-                 init_poses, masks):
+                 init_poses, masks, point_contacts=None):
         intrinsics = self.intrinsics.copy()
 
         if self.debug_flag:
@@ -187,7 +187,7 @@ class RefinePose:
 
         # Set up optimization =================================================
         T_init_list = [torch.from_numpy(pose[None, ...]).to(device)
-                     for pose in init_poses]
+                       for pose in init_poses]
         ref_masks = [
             torch.from_numpy(mask.astype(np.float32)).to(device)
             for mask in masks]
@@ -197,7 +197,8 @@ class RefinePose:
             T_init_list,
             ref_masks,
             plane_normal=self.plane_normal,
-            plane_pt=self.plane_pt)
+            plane_pt=self.plane_pt,
+            point_contacts=point_contacts)
 
         # Perform optimization ================================================
         scene_early_stopping_loss = len(masks) * sum(
