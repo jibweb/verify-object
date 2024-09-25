@@ -184,7 +184,7 @@ class ROSPoseVerifier(RefinePose):
             bbox.y_offset = box[1]
             bbox.width = box[2] - box[0]
             bbox.height = box[3] - box[1]
-            goal.bounding_boxes.append(bbox)
+            result.bounding_boxes.append(bbox)
         result.object_types = [INTERNAL_TO_PROJECT_NAMES[name]
                                for name in scene_objects]
         result.confidences = [1. for _ in scene_objects]
