@@ -1,10 +1,19 @@
 iou_early_stopping: 0.9
 optim:
+    pre_refinement : 'plane'
     max_iter: 30
     losses:
         silhouette_loss:
             active: true
+            weight: 2.
         plane_collision_loss:
             active: true
+            weight: 0.5
+        relative_pose_loss:
+            active: false
+            weight: .1
+        stable_axis_loss:
+            active: true
+            weight: .05
 resolution: 480
 mask_grabcut_refinement : true

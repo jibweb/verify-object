@@ -40,8 +40,8 @@ def plane_pt_intersection_along_ray(ray, pts, plane_normal, plane_pt):
 
 
 def plane_contact_loss(points, plane_normal, plane_pt, margin_col=0.01, margin_cont=0.05):
-    plane_distance = torch.einsum ('ijk, k -> ij', points - plane_pt, plane_normal)
-    critical_pts = plane_distance.min(dim=-1).values
+    plane_distance = torch.einsum ('ijk, jk -> ij', points - plane_pt, plane_normal[None, :])
+    critical_pts = 100 * plane_distance.min(dim=-1).values  # Critical points in cm
 
     # Assymetric L2 and Huber loss
     huber_func_col = torch.nn.SmoothL1Loss(reduction='mean', beta=margin_col)  # 0.01
@@ -51,7 +51,7 @@ def plane_contact_loss(points, plane_normal, plane_pt, margin_col=0.01, margin_c
 
     target = torch.zeros(critical_pts.shape, device=device)
 
-    return huber_func_col(mask_col * critical_pts, target) + huber_func_cont(mask_cont * critical_pts, target)
+    return 10 * margin_col * huber_func_col(mask_col * critical_pts, target) + huber_func_cont(mask_cont * critical_pts, target)
 
 
 def point_ray_loss(rays, positions):

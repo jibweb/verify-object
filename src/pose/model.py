@@ -3,6 +3,7 @@ import open3d as o3d
 import os
 import torch
 import torch.nn as nn
+from torchvision.ops import masks_to_boxes
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -17,7 +18,7 @@ import matplotlib.pyplot as plt
 
 class OptimizationModel(nn.Module):
     def __init__(self, meshes, sampled_meshes, intrinsics, width, height,
-                 objects_to_optimize, cfg, debug=False, debug_path="/debug"):
+                 objects_to_optimize, cfg, stable_axis=None, debug=False, debug_path="/debug"):
         super().__init__()
         # self.meshes = meshes
         self.sampled_meshes = sampled_meshes
@@ -31,6 +32,8 @@ class OptimizationModel(nn.Module):
 
         self.sobel_filt = Sobel()
 
+        self.stable_axis = stable_axis
+
         # Set up renderer
         self.renderer = Renderer(
             meshes, intrinsics, width, height, objects_to_optimize,
@@ -38,7 +41,7 @@ class OptimizationModel(nn.Module):
             faces_per_pixel=cfg.faces_per_pixel)
 
     def init(self, scene_objects, T_init_list, masks,
-             relative_pose=None, point_contacts=None,
+             relative_poses=None, point_contacts=None,
              plane_normal=None, plane_pt=None):
         # Init for rendering
         self.renderer.init(scene_objects, T_init_list)
@@ -49,8 +52,14 @@ class OptimizationModel(nn.Module):
             for object_name in scene_objects
         ]
 
-        if relative_pose is not None:
-            self.relative_pose = relative_pose
+        if relative_poses is not None:
+            self.relative_poses = relative_poses
+
+        if self.stable_axis:
+            self.stable_axis_objects = [
+                self.stable_axis[object_name]
+                for object_name in scene_objects
+            ]
 
         if point_contacts is not None:
             self.point_contacts = torch.from_numpy(point_contacts).to(device)
@@ -63,12 +72,14 @@ class OptimizationModel(nn.Module):
         self.ref_rays = []
         self.ref_contour_masks = []
         self.ref_contour_rays = []
+        bboxes = masks_to_boxes(torch.stack(masks))
         for obj_idx, mask in enumerate(masks):
             # Convert mask pixels to rays
             x,y,z = self.mask_to_rays(mask)
 
-            self.ref_rays.append(
-                torch.cat([x[:, None],y[:, None],z[:, None]], dim=1).to(device))
+            if self.cfg.losses.silhouette_loss.active:
+                self.ref_rays.append(
+                    torch.cat([x[:, None],y[:, None],z[:, None]], dim=1).to(device))
 
             if self.cfg.losses.contour_loss.active:
                 # Convert contour mask to rays
@@ -78,8 +89,7 @@ class OptimizationModel(nn.Module):
                 self.ref_contour_rays.append(
                     torch.cat([x_cont[:, None],y_cont[:, None],z_cont[:, None]], dim=1).to(device))
 
-            if plane_normal is not None and plane_pt is not None and self.cfg.plane_refinement:
-                # --- Align with supporting plane along mask rays -------------
+            if self.cfg.pre_refinement in ['plane', 'bbox']:
                 # Create average ray
                 ray = torch.Tensor([
                     x[:, None].mean(),
@@ -92,6 +102,8 @@ class OptimizationModel(nn.Module):
                 verts_trans = \
                     ((rot @ mesh.verts_padded()[..., None]) + trans[..., None])[..., 0]
 
+            if plane_normal is not None and plane_pt is not None and self.cfg.pre_refinement == 'plane':
+                # --- Align with supporting plane along mask rays -------------
                 # Compute the difference to apply along ray to ensure plane contact
                 vec_to_plane = plane_pt_intersection_along_ray(
                     ray,
@@ -101,8 +113,20 @@ class OptimizationModel(nn.Module):
 
                 # Adapt the initial pose
                 T_init_list[obj_idx][:, :3, 3] += vec_to_plane
+            elif self.cfg.pre_refinement == 'bbox':
+                # Correct the depth based on the bbox area ratio
+                # detection bbox at distance za, unknown: za*za  = fy fx (x1 - x2)*(y1 - y2) / ((u1 - u2)*(v1 - v2))
+                world_bbox_area = torch.prod((verts_trans[0].max(dim=0).values - verts_trans[0].min(dim=0).values)[:2])
+                za  = torch.sqrt(self.renderer.intrinsics[0,0]*self.renderer.intrinsics[1,1] * world_bbox_area
+                                 / ((bboxes[obj_idx][0] - bboxes[obj_idx][2])*(bboxes[obj_idx][1] - bboxes[obj_idx][3])))
 
-        if self.cfg.plane_refinement:
+                T_init_list[obj_idx][:, :3, 3] = za / torch.dot(ray, torch.tensor([0,0,1], dtype=ray.dtype).to(device)) * ray
+            elif self.cfg.pre_refinement == 'none':
+                pass
+            else:
+                print('Unknown pre_refinement option, skipping')
+
+        if self.cfg.pre_refinement in ['plane', 'bbox']:
             # Re-init the model with the corrected filtered poses
             self.renderer.init_repr(T_init_list)
 
@@ -142,10 +166,14 @@ class OptimizationModel(nn.Module):
                     self.renderer.scene_transformed.faces_packed()]
             )[..., :MAX_FACE, :]
 
+        if self.cfg.losses.relative_pose_loss.active or self.cfg.losses.stable_axis_loss.active or \
+           self.cfg.losses.point_contact_loss or self.cfg.losses.plane_collision_loss.active:
+            # Get pose of each object
+            R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
+
         if (self.cfg.losses.point_contact_loss and hasattr(self, 'point_contacts')) or \
            (self.cfg.losses.plane_collision_loss.active and hasattr(self, 'plane_normal') and hasattr(self, 'plane_pt')):
             # Create scene point cloud from models and poses
-            R, t = self.get_R_t()  # (N, 1, 3, 3), (N, 1, 3)
             points = torch.cat(self.scene_sampled_meshes, dim=0)  # (N, N_pts , 6 (coordinates and norms))
             points_in_cam = torch.stack([
                 (rot_mat @ points[idx, :, :3, None])[..., 0] + t[idx] for idx, rot_mat in enumerate(R)])  # (N, N_pts, 3)
@@ -163,7 +191,7 @@ class OptimizationModel(nn.Module):
                 obj_pix_position = pix_position[obj_face_mask]
 
                 if len(obj_pix_position) == 0:
-                    print("WARNING: object mesh {} outside of camera frustum".format(
+                    print("WARNING: object mesh {} outside of camera frustum or hidden".format(
                         ray_idx))
                     zero_loss = torch.tensor(0.)
                     zero_loss.requires_grad_()
@@ -191,7 +219,14 @@ class OptimizationModel(nn.Module):
                     contour_mask[..., None])
                 obj_cont_position = pix_position[obj_cont_face_mask]
 
-                contour_loss[ray_idx] = point_ray_loss(rays, obj_cont_position)
+                if len(obj_cont_position) == 0:
+                    print("WARNING: object mesh {} outside of camera frustum or hidden".format(
+                        ray_idx))
+                    zero_loss = torch.tensor(0.)
+                    zero_loss.requires_grad_()
+                    contour_loss[ray_idx] = zero_loss
+                else:
+                    contour_loss[ray_idx] = point_ray_loss(rays, obj_cont_position)
 
             loss += torch.sum(contour_loss) * self.cfg.losses.contour_loss.weight
             losses_values['contour'] = torch.sum(contour_loss).item()
@@ -204,7 +239,6 @@ class OptimizationModel(nn.Module):
 
         # Point contact loss ------------------------------------------------
         if (self.cfg.losses.point_contact_loss.active and hasattr(self, 'point_contacts')):
-            # TODO: point_contact_loss test implentation
             distances = torch.cdist(points_in_cam, self.point_contacts) # (N, N_pts, 3) and (N, N_objcontact, 3) -> (N, N_pts, N_objcontact)
             dist_to_closest_obj_pt = distances.min(dim=1).values  # (N, N_objcontact)
             loss += torch.mean(dist_to_closest_obj_pt) * self.cfg.losses.point_contact_loss.weight
@@ -217,7 +251,18 @@ class OptimizationModel(nn.Module):
                 self.plane_normal,
                 self.plane_pt)
             loss += plane_col_loss * self.cfg.losses.plane_collision_loss.weight
-            losses_values['plane_loss'] = plane_col_loss.item()
+            losses_values['plane'] = plane_col_loss.item()
+
+        # Stable axis loss ----------------------------------------------------
+        if self.cfg.losses.stable_axis_loss.active and hasattr(self, 'stable_axis_objects') and hasattr(self, 'plane_normal'):
+            axis_tens = torch.tensor(self.stable_axis_objects, dtype=bool).to(device)
+            stable_axis_loss =torch.where(
+                axis_tens,
+                1.01 - torch.abs(torch.einsum('ijk, jk -> ij', torch.transpose(R[:,0,:,:], 1, 2), self.plane_normal[None, :])),
+                1e6).min(dim=1).values * axis_tens.max(dim=1).values
+
+            loss += torch.sum(stable_axis_loss) * self.cfg.losses.depth_loss.weight
+            losses_values['stable_axis'] = torch.sum(stable_axis_loss).item()
 
         # Depth loss ----------------------------------------------------------
         if self.cfg.losses.depth_loss.active:
@@ -235,18 +280,17 @@ class OptimizationModel(nn.Module):
             losses_values['depth'] = depth_loss.item()
 
         # Relative pose loss --------------------------------------------------
-        if self.cfg.losses.relative_pose_loss.active:
-            # TODO: relative_pose_loss finish implementation
-            relative_pose_loss = torch.zeros(len(self.relative_pose)).to(device)
-            # Get pose of each object
-            R, t = self.get_R_t()
-            for idx, ((o1, o2), (ref_rot, ref_t)) in enumerate(self.relative_pose.items()):
-                relative_pose_loss[idx] +=  torch.acos((torch.trace((R[o2] @ R[o1].T) @ ref_rot) - 1.) / 2.)
+        if (self.cfg.losses.relative_pose_loss.active and hasattr(self, 'relative_poses')):
+            relative_pose_loss = torch.zeros(len(self.relative_poses)).to(device)
+
+            for idx, ((o1, o2), (ref_rot, ref_t)) in enumerate(self.relative_poses.items()):
+                # relative_pose_loss[idx] +=  torch.acos((torch.trace((R[o2][0].T @ R[o1][0]) @ ref_rot) - 1.) / 2.)
+                relative_pose_loss[idx] +=  torch.abs(1.01 - torch.dot((R[o2][0].T @ R[o1][0])[:,2], ref_rot[:,2]))
                 relative_pose_loss[idx] +=  torch.sqrt(torch.pow((t[o1] - t[o2]) - ref_t, 2).sum())
 
 
             loss += torch.sum(relative_pose_loss) * self.cfg.losses.relative_pose_loss.weight
-            losses_values['relative_pose'] = torch.sum(relative_pose_loss).item()
+            losses_values['rel_pose'] = torch.sum(relative_pose_loss).item()
 
 
         if self.cfg.losses.contour_loss.active:

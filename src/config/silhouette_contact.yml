@@ -1,9 +1,14 @@
 optim:
+    pre_refinement : 'bbox'
     max_iter: 30
     losses:
         silhouette_loss:
+            active: false
+        contour_loss:
             active: true
         plane_collision_loss:
             active: false
+        stable_axis_loss:
+            active: false
 resolution: 480
-mask_grabcut_refinement : false
+mask_grabcut_refinement : true

@@ -64,7 +64,7 @@ def load_objects_models(object_names, objects_path, cmap=plt.cm.tab20(range(20))
 
 class RefinePose:
     def __init__(self, cfg, intrinsics, objects_names, objects_to_optimize, width, height,
-                 plane_normal=None, plane_pt=None, debug_flag=False):
+                 plane_normal=None, plane_pt=None, stable_axis=None, debug_flag=False):
         self.debug_flag = debug_flag
         self.plane_normal, self.plane_pt = plane_normal, plane_pt
         self.cfg = cfg
@@ -77,10 +77,14 @@ class RefinePose:
             cmap=self.cmap,
             mesh_num_samples=cfg.mesh_num_samples)
 
-        self.init(cfg, intrinsics, meshes, sampled_down_meshes, objects_to_optimize, width, height)
+        self.init(
+            cfg, intrinsics,
+            meshes, sampled_down_meshes,
+            objects_to_optimize, width, height,
+            stable_axis=stable_axis)
 
     def init(self, cfg, intrinsics, meshes, sampled_down_meshes,
-             objects_to_optimize, width, height):
+             objects_to_optimize, width, height, stable_axis=None):
         self.scale = width / self.cfg.resolution
         self.intrinsics = intrinsics
         self.intrinsics[:2, :] /= self.scale
@@ -95,6 +99,7 @@ class RefinePose:
             int(height / self.scale),
             objects_to_optimize,
             cfg.optim,
+            stable_axis=stable_axis,
             debug=self.debug_flag,
             debug_path=self.cfg.debug_path)
 
@@ -128,7 +133,8 @@ class RefinePose:
         return refined_masks
 
     def optimize(self, rgb, depth, scene_objects,
-                 init_poses, masks, point_contacts=None):
+                 init_poses, masks,
+                 point_contacts=None, relative_poses=None):
         intrinsics = self.intrinsics.copy()
 
         if self.debug_flag:
@@ -192,13 +198,21 @@ class RefinePose:
             torch.from_numpy(mask.astype(np.float32)).to(device)
             for mask in masks]
 
+        if relative_poses is not None:
+            relative_poses = {
+                k : (torch.from_numpy(R.astype(np.float32)).to(device),
+                    torch.from_numpy(t.astype(np.float32)).to(device))
+                for k, (R,t) in relative_poses.items()
+            }
+
         self.model.init(
             scene_objects,
             T_init_list,
             ref_masks,
             plane_normal=self.plane_normal,
             plane_pt=self.plane_pt,
-            point_contacts=point_contacts)
+            point_contacts=point_contacts,
+            relative_poses=relative_poses)
 
         # Perform optimization ================================================
         scene_early_stopping_loss = len(masks) * sum(
