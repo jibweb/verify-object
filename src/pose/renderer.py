@@ -28,7 +28,12 @@ class Renderer(nn.Module):
         super().__init__()
         self.meshes = meshes
         self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
-        self.objects_to_optimize = objects_to_optimize
+        if objects_to_optimize is not None:
+            self.objects_to_optimize = objects_to_optimize
+        else:
+            self.objects_to_optimize = {
+                k: True for k in meshes.keys()
+            }
 
         # Plane (Table in this dataset) point clouds and transformation matrix
         self.plane_pcd = None

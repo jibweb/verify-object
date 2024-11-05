@@ -174,7 +174,7 @@ class ROSPoseVerifier(RefinePose):
         super().__init__(
             cfg=cfg,
             intrinsics=np.array(self.camera_info.K).reshape(3,3),
-            objects_names=SUPPORTED_OBJECTS,
+            objects_names=list(SUPPORTED_OBJECTS),
             objects_to_optimize=OBJECTS_TO_OPTIMIZE_INTERNAL,
             width=self.camera_info.width,
             height=self.camera_info.height,

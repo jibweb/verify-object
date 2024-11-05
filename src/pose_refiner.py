@@ -5,61 +5,27 @@ from matplotlib import pyplot as plt
 import numpy as np
 import open3d as o3d
 import os
-from pytorch3d.io import load_obj
-from pytorch3d.structures import Meshes
-from pytorch3d.renderer import TexturesVertex
+# from pytorch3d.io import load_obj
+# from pytorch3d.structures import Meshes
+# from pytorch3d.renderer import TexturesVertex
 import sys
 import torch
 from tqdm import tqdm
-import trimesh
+# import trimesh
 import yaml
 
 from pose.model import OptimizationModel
 # import pose.object_pose as object_pose
 from collision.plane_detector import PlaneDetector
-from collision.point_clouds_utils import plane_pt_intersection_along_ray
+# from collision.point_clouds_utils import plane_pt_intersection_along_ray
 # from contour.contour import compute_sdf_image
 # from utility.logger import Logger
 from config import config
 from collision.point_clouds_utils import project_point_cloud
-
+from utility.meshes_io import load_objects_models
 
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
 torch.autograd.set_detect_anomaly(True)  # To check whether we have nan or inf in our gradient calculation
-
-
-def load_objects_models(object_names, objects_path, cmap=plt.cm.tab20(range(20)), mesh_num_samples=500, scale=1000):
-    meshes = {}
-    sampled_down_meshes = {}
-
-    for oi, object_name in enumerate(object_names):
-        # Load mesh
-        verts, faces_idx, _ = load_obj(os.path.join(objects_path, f'{object_name}.obj'))
-        textures = TexturesVertex(
-            verts_features=torch.from_numpy(cmap[oi][:3])[None, None, :]
-                                    .expand(-1, verts.shape[0], -1).type_as(verts))
-
-        mesh = Meshes(
-            verts=[verts/scale],
-            faces=[faces_idx.verts_idx],
-            textures=textures)
-
-        meshes[oi+1] = mesh
-
-        # Create a randomly point-normal set
-        # Same number of points for each individual object
-        mesh_sampled_down = trimesh.load(os.path.join(objects_path, f'{object_name}.obj'))
-        norms = mesh_sampled_down.face_normals
-        samples = trimesh.sample.sample_surface_even(mesh_sampled_down, mesh_num_samples) # either exactly NUM_samples, or <= NUM_SAMPLES --> pad by random.choice
-        samples_norms = norms[samples[1]] # Norms pointing out of the object
-        samples_point_norm = np.concatenate((np.asarray(samples[0]/scale), np.asarray(0-samples_norms)), axis=1)
-        if samples_point_norm.shape[0] < mesh_num_samples:  # NUM_SAMPLES not equal to mesh_num_samples -> padding
-            idx = np.random.choice(samples_point_norm.shape[0], mesh_num_samples - samples_point_norm.shape[0])
-            samples_point_norm = np.concatenate((samples_point_norm, samples_point_norm[idx]), axis=0)
-
-        sampled_down_meshes[oi+1] = torch.from_numpy(samples_point_norm.astype(np.float32))[None, ...]
-
-    return meshes, sampled_down_meshes
 
 
 class RefinePose:
@@ -71,11 +37,27 @@ class RefinePose:
 
         # load all meshes that will be needed
         self.cmap = plt.cm.tab20(range(20)) # 20 different colors, two consecutive ones are similar (for two instances)
+        if cfg.objects_loader == 'bop':
+            meshes_fns = ["obj_{:06d}.obj".format(obj_id) for obj_id in objects_names]
+        elif cfg.objects_loader == '3d-dat':
+            with open(os.path.join(cfg.objects_path, "object_library.yaml")) as fp:
+                objects_dict = yaml.safe_load(fp)
+
+            if objects_names is not None:
+                meshes_fns = [obj['mesh'] for obj in objects_dict if obj['id'] in objects_names]
+                assert len(meshes_fns) == len(objects_names), "Corresponding models of some objects_names entry could not be found"
+            else:
+                meshes_fns = [obj['mesh'] for obj in objects_dict]
+                objects_names = [obj['id'] for obj in objects_dict]
+        else:
+            raise Exception("Unknown object loader type, no object loaded. Valid are ['bop', 3d-dat]")
+
         meshes, sampled_down_meshes = load_objects_models(
-            ["obj_{:06d}".format(obj_id) for obj_id in objects_names],
-            cfg.objects_path,
-            cmap=self.cmap,
-            mesh_num_samples=cfg.mesh_num_samples)
+                meshes_fns,
+                cfg.objects_path,
+                obj_idx_keys=objects_names,
+                cmap=self.cmap,
+                mesh_num_samples=cfg.mesh_num_samples)
 
         self.init(
             cfg, intrinsics,
@@ -318,9 +300,12 @@ class RefinePose:
             predicted_poses.append(pose)
 
         if self.debug_flag:
-            pcd2 = o3d.geometry.PointCloud()
-            pcd2.points = o3d.utility.Vector3dVector(self.model.renderer.scene_transformed.verts_packed().detach().cpu().numpy())
-            o3d.visualization.draw_geometries([cloud, pcd2])
+            mesh2 = o3d.geometry.TriangleMesh()
+            mesh2.vertices = o3d.utility.Vector3dVector(self.model.renderer.scene_transformed.verts_packed().detach().cpu().numpy())
+            mesh2.triangles = o3d.utility.Vector3iVector(self.model.renderer.scene_transformed.faces_packed().detach().cpu().numpy())
+            verts = np.asarray(mesh2.vertices)
+            mesh2.vertex_colors = o3d.utility.Vector3dVector((verts - verts.min(axis=0)) / (verts.max(axis=0) - verts.min(axis=0)))
+            o3d.visualization.draw_geometries([cloud, mesh2])
 
         return predicted_poses, rgb, depth, masks, optim_images[-1]
 
