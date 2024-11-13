@@ -126,7 +126,7 @@ class RefinePose:
         # Scale images ========================================================
         if self.scale != 1:
             rgb = cv2.resize(rgb, (int(rgb.shape[1] / self.scale), int(rgb.shape[0] / self.scale)))
-            depth = cv2.resize(depth, (int(depth.shape[1] / self.scale), int(depth.shape[0] / self.scale))) # TODO: check size to see if scaling is necessary
+            depth = cv2.resize(depth, (int(depth.shape[1] / self.scale), int(depth.shape[0] / self.scale)), interpolation=cv2.INTER_NEAREST) # TODO: check size to see if scaling is necessary
             masks = [
                 cv2.resize(
                     mask.astype(np.float32),
