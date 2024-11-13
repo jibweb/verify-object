@@ -7,7 +7,7 @@ class PlaneDetector:
 
     def __init__(self, width, height, to_meters=1e-3, distance_threshold=0.005):
         self.width, self.height = int(width), int(height)
-        self.vmap, self.umap = np.meshgrid(range(self.width), range(self.height))
+        self.umap, self.vmap = np.meshgrid(range(self.width), range(self.height))
 
         self.to_meters = to_meters
         self.distance_threshold = distance_threshold
@@ -19,8 +19,8 @@ class PlaneDetector:
 
         # === project to point cloud in XYZRGB format, Nx6
         pt2 = D * self.to_meters
-        pt0 = (self.vmap - cam_cx) * pt2 / cam_fx
-        pt1 = (self.umap - cam_cy) * pt2 / cam_fy
+        pt0 = (self.umap - cam_cx) * pt2 / cam_fx
+        pt1 = (self.vmap - cam_cy) * pt2 / cam_fy
         points = np.dstack((pt0, pt1, pt2, C)).astype(np.float32)
         points = points.reshape((self.width * self.height, 6))
 
