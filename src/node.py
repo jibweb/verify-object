@@ -15,7 +15,7 @@ import cv2
 from actionlib import SimpleActionServer
 import rospy
 import ros_numpy
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import PoseArray, Pose
 from sensor_msgs.msg import Image, CameraInfo, RegionOfInterest
 from tracebot_msgs.msg import VerifyObjectAction, VerifyObjectGoal, VerifyObjectResult
 
@@ -34,6 +34,7 @@ INTERNAL_TO_PROJECT_NAMES = {
     8: "YellowPlug",
     9: "WhiteClamp",
     10: "RedClamp",
+    11: "NeedleNeedleCap",
     # 'container': 'Canister',
 }
 
@@ -80,12 +81,7 @@ STABLE_AXIS_INTERNAL = {
 SUPPORTED_OBJECTS = INTERNAL_TO_PROJECT_NAMES.keys()
 
 RELATIVE_POSES = {
-    'cap_to_needle': (
-        np.array([[ 0.53621892, -0.84066675, -0.07581973],
-                  [ 0.84096565,  0.53978929, -0.03747184],
-                  [ 0.07242801, -0.04366868,  0.99641721]]),
-        np.array([-0.00215291, -0.00192686, -0.00101382])
-    )
+    'cap_to_needle': (np.eye(3), np.zeros(3))
 }
 
 
@@ -146,6 +142,8 @@ class ROSPoseVerifier(RefinePose):
         # Reading camera intrinsics
         self.camera_info_topic = rospy.get_param('/locateobject/camera_info_topic',
                                                 '/camera/color/camera_info')
+        self.contact_pts_left_topic = '/tracebot_left_gripper_contacts_camera_frame'
+        self.contact_pts_right_topic = '/tracebot_right_gripper_contacts_camera_frame'
         rospy.loginfo(f"[{name}] Waiting for camera info ...")
         self.camera_info = rospy.wait_for_message(self.camera_info_topic, CameraInfo)
         rospy.loginfo(f"[{name}] Camera info received")
@@ -154,6 +152,7 @@ class ROSPoseVerifier(RefinePose):
                 0.5)
 
         self.viz_pub = rospy.Publisher(f"{name}/debug_visualization", Image, queue_size=10, latch=True)
+        self.contact_pts = None
 
         with open('/code/config/silhouette_plane.yml') as fp:
             self.plane_params = yaml.safe_load(fp)
@@ -203,12 +202,35 @@ class ROSPoseVerifier(RefinePose):
         self.cfg.from_dict(self.inhand_params)
         self.model.cfg = self.cfg.optim
 
-        # TODO: Obtain poses from DT ?
-        # TODO: Obtain masks from Yolov8 somehow (filtered only for hand result)
-        # TODO: Obtain contact points information
+        contact_pts = None
+        if goal.header.frame_id == 'left':
+            try:
+                contact_pts = rospy.wait_for_message(self.contact_pts_left_topic, PoseArray, 3)
+                contact_pts = contact_pts.poses
+            except Exception as e:
+                rospy.logwarn(e)
+        elif goal.header.frame_id == 'right':
+            try:
+                contact_pts = rospy.wait_for_message(self.contact_pts_right_topic, PoseArray, 3)
+                contact_pts = contact_pts.poses
+            except Exception as e:
+                rospy.logwarn(e)
+
+        if contact_pts is not None and len(contact_pts) != 0:
+            self.contact_pts = np.array([[pose.position.x, pose.position.y, pose.position.z] for pose in contact_pts]).astype(np.float32)
         # TODO: Add gripper CAD in the scene
+        if goal.object_types[0] in ['Needle', 'NeedleCap']:
+            goal.object_types[0] = 'NeedleNeedleCap'
 
         result = self.generic_callback(goal)
+
+        if result.object_types[0] == 'NeedleNeedleCap':
+            result.object_types = ['Needle', 'NeedleCap']
+            result.object_poses.append(result.object_poses[0])
+            result.bounding_boxes.append(result.bounding_boxes[0])
+            result.confidences.append(result.confidences[0])
+
+        self.contact_pts = None
         self._server_inhand.set_succeeded(result)
 
     def create_masks_from_bounding_boxes(self, bounding_boxes, height, width):
@@ -293,7 +315,7 @@ class ROSPoseVerifier(RefinePose):
         if len(scene_objects) != 0:
             predicted_poses, ref_rgb, ref_depth, masks, viz_img = super().optimize(
                 rgb, depth, scene_objects, init_poses, masks,
-                point_contacts=None, relative_poses=relative_poses)
+                point_contacts=self.contact_pts, relative_poses=relative_poses)
         else:
             rospy.loginfo("No object above detection threshold")
             predicted_poses = []
