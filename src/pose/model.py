@@ -113,6 +113,8 @@ class OptimizationModel(nn.Module):
 
                 # Adapt the initial pose
                 T_init_list[obj_idx][:, :3, 3] += vec_to_plane
+                # Re-init the model with the corrected filtered poses
+                self.renderer.init_repr(T_init_list)
             elif self.cfg.pre_refinement == 'bbox':
                 # Correct the depth based on the bbox area ratio
                 # detection bbox at distance za, unknown: za*za  = fy fx (x1 - x2)*(y1 - y2) / ((u1 - u2)*(v1 - v2))
@@ -121,14 +123,13 @@ class OptimizationModel(nn.Module):
                                  / ((bboxes[obj_idx][0] - bboxes[obj_idx][2])*(bboxes[obj_idx][1] - bboxes[obj_idx][3])))
 
                 T_init_list[obj_idx][:, :3, 3] = za / torch.dot(ray, torch.tensor([0,0,1], dtype=ray.dtype).to(device)) * ray
+
+                # Re-init the model with the corrected filtered poses
+                self.renderer.init_repr(T_init_list)
             elif self.cfg.pre_refinement == 'none':
                 pass
             else:
                 print('Unknown pre_refinement option, skipping')
-
-        if self.cfg.pre_refinement in ['plane', 'bbox']:
-            # Re-init the model with the corrected filtered poses
-            self.renderer.init_repr(T_init_list)
 
     def mask_to_rays(self, mask, normalize=True):
         indices_v, indices_u = torch.nonzero(mask, as_tuple=True)
@@ -150,18 +151,19 @@ class OptimizationModel(nn.Module):
     def forward(self, ref_rgb, ref_depth):
         # Render the silhouette using the estimated pose
         image_est, depth_est, obj_masks, fragments_est = self.renderer()
+        valid_mask = fragments_est.pix_to_face >= 0
 
         loss = torch.zeros(1).to(device)
         losses_values = {}
 
         # === SETUP ===========================================================
         MAX_FACE = min(5,self.cfg.faces_per_pixel)
-        if self.cfg.losses.silhouette_loss.active or self.cfg.losses.contour_loss.active:
+        if self.cfg.losses.silhouette_loss.active or self.cfg.losses.contour_loss.active or self.cfg.losses.depth_loss.active:
             # Mask for padded pixels.
-            valid_mask = fragments_est.pix_to_face >= 0
             pix_position = interpolate_face_attributes(
                 fragments_est.pix_to_face,
-                torch.ones(fragments_est.bary_coords.shape, device=device),
+                torch.ones(fragments_est.bary_coords.shape, device=device)/3.,
+                # fragments_est.bary_coords.detach(),
                 self.renderer.scene_transformed.verts_packed()[
                     self.renderer.scene_transformed.faces_packed()]
             )[..., :MAX_FACE, :]
@@ -199,7 +201,6 @@ class OptimizationModel(nn.Module):
                 else:
                     diff_rend_loss[ray_idx] = point_ray_loss(rays, obj_pix_position)
 
-            # diff_rend_loss = torch.sum(diff_rend_loss)
             loss += torch.sum(diff_rend_loss) * self.cfg.losses.silhouette_loss.weight
             losses_values['silhouette'] = torch.sum(diff_rend_loss).item()
 
@@ -266,18 +267,28 @@ class OptimizationModel(nn.Module):
 
         # Depth loss ----------------------------------------------------------
         if self.cfg.losses.depth_loss.active:
-            # TODO: depth_loss finish implementation
             ref_depth_tensor = torch.from_numpy(
-                ref_depth.astype(np.float32)).to(device)
-            # ref_depth_tensor *= (self.image_ref[..., 0] > 0).float()
-            # d_depth = (ref_depth_tensor - depth_est)
-            # depth = torch.gather(zbuf, 0, depth_indices[..., None])
-            d_depth = (depth_est - ref_depth_tensor[None, ..., None])[depth_est > 0]
+                ref_depth.astype(np.float32)).to(device)[None, ...]
+            depth_loss = torch.zeros(len(self.ref_masks)).to(device)
+            validity_mask = torch.logical_and(
+                valid_mask[..., 0],
+                (ref_depth_tensor > 0))
 
-            # depth_loss = torch.sum(d_depth**2) / torch.sum((zbuf > -1).float())
-            depth_loss = torch.sum(d_depth**2) / (d_depth.shape[0])
-            loss += depth_loss * self.cfg.losses.depth_loss.weight
-            losses_values['depth'] = depth_loss.item()
+            for mask_idx, mask in enumerate(self.ref_masks):
+                if not self.renderer.active_objects[mask_idx]:
+                    continue
+                obj_face_mask = torch.logical_and(
+                    torch.logical_and(
+                        mask[None, ...],
+                        obj_masks[mask_idx]),
+                    validity_mask
+                )
+                depth_loss[mask_idx] = torch.mean(
+                    torch.abs(pix_position[...,0, 2][obj_face_mask] - ref_depth_tensor[obj_face_mask]))
+
+            loss += torch.sum(depth_loss) * self.cfg.losses.depth_loss.weight
+            losses_values['depth'] = torch.sum(depth_loss).item()
+            # # TODO: depth_loss finish implementation
 
         # Relative pose loss --------------------------------------------------
         if (self.cfg.losses.relative_pose_loss.active and hasattr(self, 'relative_poses')):
