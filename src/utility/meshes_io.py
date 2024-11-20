@@ -33,14 +33,19 @@ def load_objects_models(mesh_names, objects_path, obj_idx_keys, cmap, mesh_num_s
 
         # Create a randomly point-normal set
         # Same number of points for each individual object
-        mesh_sampled_down = trimesh.load(os.path.join(objects_path, f'{mesh_name}'))
-        norms = mesh_sampled_down.face_normals
-        samples = trimesh.sample.sample_surface_even(mesh_sampled_down, mesh_num_samples) # either exactly NUM_samples, or <= NUM_SAMPLES --> pad by random.choice
-        samples_norms = norms[samples[1]] # Norms pointing out of the object
-        samples_point_norm = np.concatenate((np.asarray(samples[0]/scale), np.asarray(0-samples_norms)), axis=1)
-        if samples_point_norm.shape[0] < mesh_num_samples:  # NUM_SAMPLES not equal to mesh_num_samples -> padding
-            idx = np.random.choice(samples_point_norm.shape[0], mesh_num_samples - samples_point_norm.shape[0])
-            samples_point_norm = np.concatenate((samples_point_norm, samples_point_norm[idx]), axis=0)
+        sampled_filename = os.path.join(objects_path, f'sampled_{mesh_name[:-4]}.npy')
+        if os.path.isfile(sampled_filename):
+            samples_point_norm = np.load(sampled_filename)
+        else:
+            mesh_sampled_down = trimesh.load(os.path.join(objects_path, f'{mesh_name}'), force='mesh')
+            norms = mesh_sampled_down.face_normals
+            samples = trimesh.sample.sample_surface_even(mesh_sampled_down, mesh_num_samples) # either exactly NUM_samples, or <= NUM_SAMPLES --> pad by random.choice
+            samples_norms = norms[samples[1]] # Norms pointing out of the object
+            samples_point_norm = np.concatenate((np.asarray(samples[0]/scale), np.asarray(0-samples_norms)), axis=1)
+            if samples_point_norm.shape[0] < mesh_num_samples:  # NUM_SAMPLES not equal to mesh_num_samples -> padding
+                idx = np.random.choice(samples_point_norm.shape[0], mesh_num_samples - samples_point_norm.shape[0])
+                samples_point_norm = np.concatenate((samples_point_norm, samples_point_norm[idx]), axis=0)
+            np.save(sampled_filename, samples_point_norm)
 
         sampled_down_meshes[obj_idx_keys[oi]] = torch.from_numpy(samples_point_norm.astype(np.float32))[None, ...]
 

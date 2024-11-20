@@ -34,7 +34,7 @@ INTERNAL_TO_PROJECT_NAMES = {
     8: "YellowPlug",
     9: "WhiteClamp",
     10: "RedClamp",
-    11: "NeedleNeedleCap",
+    # 11: "NeedleNeedleCap",
     # 'container': 'Canister',
 }
 
@@ -219,8 +219,10 @@ class ROSPoseVerifier(RefinePose):
         if contact_pts is not None and len(contact_pts) != 0:
             self.contact_pts = np.array([[pose.position.x, pose.position.y, pose.position.z] for pose in contact_pts]).astype(np.float32)
         # TODO: Add gripper CAD in the scene
-        if goal.object_types[0] in ['Needle', 'NeedleCap']:
-            goal.object_types[0] = 'NeedleNeedleCap'
+        if goal.object_types[0] == 'Needle':
+            goal.object_types[0] = 'NeedleCap'
+        elif goal.object_types[0] == 'NeedleCap':
+            goal.object_types[0] = 'Needle'
 
         result = self.generic_callback(goal)
 
