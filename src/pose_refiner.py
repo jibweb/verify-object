@@ -157,7 +157,7 @@ class RefinePose:
             scene, intrinsics, reference_height, reference_width)
 
         if self.debug_flag:
-            plt.imshow(scene_depth); plt.savefig(os.path.join(self.cfg.debug_path, "ref_depth.png"))
+            cv2.imwrite(os.path.join(self.cfg.debug_path, "ref_depth.png"), scene_depth)
 
         # Prepare target silhouettes ==========================================
         if self.cfg.mask_grabcut_refinement:
