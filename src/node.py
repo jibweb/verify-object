@@ -344,6 +344,9 @@ class ROSPoseVerifier(RefinePose):
                 result.confidences.append(1.)
                 obj_name = 4
 
+            if obj_name in [2,7]: # Replacing Small and Large bottle detections with Medium ones
+                obj_name = 1
+
             result.object_types.append(INTERNAL_TO_PROJECT_NAMES[obj_name])
             result.object_poses.append(ros_numpy.msgify(Pose, predicted_poses[obj_idx]))
             # result.bounding_boxes = bounding_boxes
