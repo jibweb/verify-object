@@ -34,7 +34,7 @@ INTERNAL_TO_PROJECT_NAMES = {
     8: "YellowPlug",
     9: "WhiteClamp",
     10: "RedClamp",
-    # 11: "NeedleNeedleCap",
+    11: "NeedleNeedleCap",
     # 'container': 'Canister',
 }
 
@@ -49,6 +49,7 @@ OBJECTS_TO_OPTIMIZE = {
     "YellowPlug": True,
     "WhiteClamp": True,
     "RedClamp": True,
+    "NeedleNeedleCap": True,
 }
 
 STABLE_AXIS = {
@@ -62,6 +63,7 @@ STABLE_AXIS = {
     "YellowPlug": [0,0,0],
     "WhiteClamp": [0,0,0],
     "RedClamp": [0,0,0],
+    "NeedleNeedleCap": [0,0,0],
 }
 
 PROJECT_TO_INTERNAL_NAMES = {
@@ -141,7 +143,7 @@ class ROSPoseVerifier(RefinePose):
     def __init__(self, name, cfg, debug_flag=False):
         # Reading camera intrinsics
         self.camera_info_topic = rospy.get_param('/locateobject/camera_info_topic',
-                                                '/camera/color/camera_info')
+                                                '/tracebot_camera/color/camera_info')
         self.contact_pts_left_topic = '/tracebot_left_gripper_contacts_camera_frame'
         self.contact_pts_right_topic = '/tracebot_right_gripper_contacts_camera_frame'
         rospy.loginfo(f"[{name}] Waiting for camera info ...")
@@ -285,20 +287,22 @@ class ROSPoseVerifier(RefinePose):
                 if get_bbox_iou(bounding_boxes[cap_idx], bounding_boxes[needle_idx]) > 0.01 and \
                    max([0] + [get_bbox_iou(bbox, bounding_boxes[needle_idx]) for bbox in boosted_boxes]) < 0.01 and \
                    (confidences[cap_idx] >= self.det_threshold or confidences[needle_idx] >= self.det_threshold):
-                    confidences[cap_idx] = max(confidences[cap_idx], self.det_threshold)
+                    scene_objects[needle_idx] = 11
+                    confidences[cap_idx] = 0.  # max(confidences[cap_idx], self.det_threshold)
                     confidences[needle_idx] = max(confidences[needle_idx], self.det_threshold)
+                    masks[needle_idx] += masks[cap_idx]
                     boosted_boxes.append(copy.copy(bounding_boxes[needle_idx]))
-                    relative_poses[(cap_idx, needle_idx)] = RELATIVE_POSES['cap_to_needle']
+                    # relative_poses[(cap_idx, needle_idx)] = RELATIVE_POSES['cap_to_needle']
 
-            for white_clamp_idx in white_clamp_indices:
-                if get_bbox_iou(bounding_boxes[cap_idx], bounding_boxes[white_clamp_idx]) > 0.01 and \
-                   max([0] + [get_bbox_iou(bbox, bounding_boxes[white_clamp_idx]) for bbox in boosted_boxes]) < 0.01 and \
-                   (confidences[cap_idx] >= self.det_threshold or confidences[white_clamp_idx] >= self.det_threshold):
-                    confidences[cap_idx] = max(confidences[cap_idx], self.det_threshold)
-                    confidences[white_clamp_idx] = max(confidences[white_clamp_idx], self.det_threshold)
-                    scene_objects[white_clamp_idx] = 3  # Transform the white clamp det into a needle det
-                    boosted_boxes.append(copy.copy(bounding_boxes[white_clamp_idx]))
-                    relative_poses[(cap_idx, white_clamp_idx)] = RELATIVE_POSES['cap_to_needle']
+            # for white_clamp_idx in white_clamp_indices:
+            #     if get_bbox_iou(bounding_boxes[cap_idx], bounding_boxes[white_clamp_idx]) > 0.01 and \
+            #        max([0] + [get_bbox_iou(bbox, bounding_boxes[white_clamp_idx]) for bbox in boosted_boxes]) < 0.01 and \
+            #        (confidences[cap_idx] >= self.det_threshold or confidences[white_clamp_idx] >= self.det_threshold):
+            #         confidences[cap_idx] = max(confidences[cap_idx], self.det_threshold)
+            #         confidences[white_clamp_idx] = max(confidences[white_clamp_idx], self.det_threshold)
+            #         scene_objects[white_clamp_idx] = 3  # Transform the white clamp det into a needle det
+            #         boosted_boxes.append(copy.copy(bounding_boxes[white_clamp_idx]))
+            #         # relative_poses[(cap_idx, white_clamp_idx)] = RELATIVE_POSES['cap_to_needle']
 
         # Filter results according to confidence
         scene_objects = [obj for obj_idx, obj in enumerate(scene_objects)
@@ -326,29 +330,38 @@ class ROSPoseVerifier(RefinePose):
         self.publish_viz(viz_img)
 
         result = VerifyObjectResult()
-        result.object_poses = [
-            ros_numpy.msgify(Pose, pose) for pose in predicted_poses
-        ]
         result.header = goal.header
-        # result.bounding_boxes = bounding_boxes
-        # for mask in obj_masks: #TODO obtain updated masks from renderer
-        #     us, vs = np.nonzero(mask)
-        #     bbox = RegionOfInterest()
-        #     bbox.x_offset = vs.min()
-        #     bbox.y_offset = us.min()
-        #     bbox.width = vs.max() - vs.min()
-        #     bbox.height = us.max() - us.min()
-        #     result.bounding_boxes.append(bbox)
-        for box in bounding_boxes:
+        for obj_idx, obj_name in enumerate(scene_objects):
+            if obj_name == 11:
+                result.object_types.append('Needle')
+                result.object_poses.append(ros_numpy.msgify(Pose, predicted_poses[obj_idx]))
+                bbox = RegionOfInterest() # TODO correct bounding box from renderer
+                bbox.x_offset = bounding_boxes[obj_idx][0]
+                bbox.y_offset = bounding_boxes[obj_idx][1]
+                bbox.width = bounding_boxes[obj_idx][2] - bounding_boxes[obj_idx][0]
+                bbox.height = bounding_boxes[obj_idx][3] - bounding_boxes[obj_idx][1]
+                result.bounding_boxes.append(bbox)
+                result.confidences.append(1.)
+                obj_name = 4
+
+            result.object_types.append(INTERNAL_TO_PROJECT_NAMES[obj_name])
+            result.object_poses.append(ros_numpy.msgify(Pose, predicted_poses[obj_idx]))
+            # result.bounding_boxes = bounding_boxes
+            # for mask in obj_masks: #TODO obtain updated masks from renderer
+            #     us, vs = np.nonzero(mask)
+            #     bbox = RegionOfInterest()
+            #     bbox.x_offset = vs.min()
+            #     bbox.y_offset = us.min()
+            #     bbox.width = vs.max() - vs.min()
+            #     bbox.height = us.max() - us.min()
+            #     result.bounding_boxes.append(bbox)
             bbox = RegionOfInterest()
-            bbox.x_offset = box[0]
-            bbox.y_offset = box[1]
-            bbox.width = box[2] - box[0]
-            bbox.height = box[3] - box[1]
+            bbox.x_offset = bounding_boxes[obj_idx][0]
+            bbox.y_offset = bounding_boxes[obj_idx][1]
+            bbox.width = bounding_boxes[obj_idx][2] - bounding_boxes[obj_idx][0]
+            bbox.height = bounding_boxes[obj_idx][3] - bounding_boxes[obj_idx][1]
             result.bounding_boxes.append(bbox)
-        result.object_types = [INTERNAL_TO_PROJECT_NAMES[name]
-                               for name in scene_objects]
-        result.confidences = [1. for _ in scene_objects]
+            result.confidences.append(1.)
 
         return result
 
