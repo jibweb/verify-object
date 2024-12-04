@@ -1,10 +1,12 @@
 optim:
-    pre_refinement : 'bbox'
+    pre_refinement : 'none'
     max_iter: 30
     losses:
         silhouette_loss:
-            active: false
+            active: true
         contour_loss:
+            active: false
+        point_contact_loss:
             active: true
         plane_collision_loss:
             active: false

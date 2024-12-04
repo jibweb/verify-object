@@ -305,7 +305,13 @@ class RefinePose:
             mesh2.triangles = o3d.utility.Vector3iVector(self.model.renderer.scene_transformed.faces_packed().detach().cpu().numpy())
             verts = np.asarray(mesh2.vertices)
             mesh2.vertex_colors = o3d.utility.Vector3dVector((verts - verts.min(axis=0)) / (verts.max(axis=0) - verts.min(axis=0)))
-            o3d.visualization.draw_geometries([cloud, mesh2])
+            to_draw = [cloud, mesh2]
+            if point_contacts is not None:
+                for pt in point_contacts:
+                    to_draw.append(
+                        o3d.geometry.TriangleMesh.create_sphere(radius=0.01).translate(pt))
+
+            o3d.visualization.draw_geometries(to_draw)
 
         return predicted_poses, rgb, depth, masks, optim_images[-1]
 
