@@ -27,7 +27,7 @@ class Renderer(nn.Module):
                  representation='q', faces_per_pixel=20):
         super().__init__()
         self.meshes = meshes
-        self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
+        self.device = device
         if objects_to_optimize is not None:
             self.objects_to_optimize = objects_to_optimize
         else:
@@ -67,13 +67,13 @@ class Renderer(nn.Module):
         # - [faces_per_pixel] faces are blended
         # - [sigma, gamma] controls opacity and sharpness of edges
         # - If [bin_size] and [max_faces_per_bin] are None (=default), coarse-to-fine rasterization is used.
-        blend_params = BlendParams(sigma=1e-4, gamma=1e-4, background_color=(0.0, 0.0, 0.0))  # TODO vary this, faces_per_pixel etc. to find good value
+        blend_params = BlendParams(sigma=1e-4, gamma=1e-4, background_color=(0.0, 0.0, 0.0))
         soft_raster_settings = RasterizationSettings(
             image_size=(height, width),
             blur_radius= 0., #np.log(1. / 1e-4 - 1.) * blend_params.sigma,
             faces_per_pixel=faces_per_pixel,
             max_faces_per_bin=20000,
-            # perspective_correct=True, # TODO: Correct?
+            # perspective_correct=True,
         )
         lights = PointLights(device=device, location=((0.0, 0.0, 0.0),), ambient_color=((1.0, 1.0, 1.0),),
                              diffuse_color=((0.0, 0.0, 0.0),), specular_color=((0.0, 0.0, 0.0),),

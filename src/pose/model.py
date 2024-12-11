@@ -22,7 +22,7 @@ class OptimizationModel(nn.Module):
         super().__init__()
         # self.meshes = meshes
         self.sampled_meshes = sampled_meshes
-        self.device = device  # TODO : should I check the device for all the objects ? Or assume that they are all set for cuda?
+        self.device = device
         self.cfg = cfg
         self.debug = debug
         self.debug_path = debug_path
@@ -288,7 +288,6 @@ class OptimizationModel(nn.Module):
 
             loss += torch.sum(depth_loss) * self.cfg.losses.depth_loss.weight
             losses_values['depth'] = torch.sum(depth_loss).item()
-            # # TODO: depth_loss finish implementation
 
         # Relative pose loss --------------------------------------------------
         if (self.cfg.losses.relative_pose_loss.active and hasattr(self, 'relative_poses')):
