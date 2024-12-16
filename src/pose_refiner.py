@@ -309,7 +309,7 @@ class RefinePose:
             if point_contacts is not None:
                 for pt in point_contacts:
                     to_draw.append(
-                        o3d.geometry.TriangleMesh.create_sphere(radius=0.01).translate(pt))
+                        o3d.geometry.TriangleMesh.create_sphere(radius=0.007).translate(pt))
 
             o3d.visualization.draw_geometries(to_draw)
 

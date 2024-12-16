@@ -240,8 +240,18 @@ class OptimizationModel(nn.Module):
 
         # Point contact loss ------------------------------------------------
         if (self.cfg.losses.point_contact_loss.active and hasattr(self, 'point_contacts')):
-            distances = torch.cdist(points_in_cam, self.point_contacts) # (N, N_pts, 3) and (N, N_objcontact, 3) -> (N, N_pts, N_objcontact)
-            dist_to_closest_obj_pt = distances.min(dim=1).values  # (N, N_objcontact)
+            eig_vals, eig_vecs = torch.linalg.eig(torch.cov(self.point_contacts.T))
+            eig_vals, eig_vecs = eig_vals.real, eig_vecs.real
+            smallest_eig_idx = eig_vals.argmin()
+            if eig_vals[smallest_eig_idx] / eig_vals.sum() < 0.05:
+                contact_plane_normal = eig_vecs.T[smallest_eig_idx]
+                contact_plane_distance = torch.einsum ('ijk, jk -> ij', points_in_cam - self.point_contacts[0], contact_plane_normal[None, :])
+                points_in_plane = points_in_cam - contact_plane_distance[..., None] * contact_plane_normal
+                # distances = torch.cdist(points_in_plane, self.point_contacts) # (N, N_pts, 3) and (N, N_objcontact, 3) -> (N, N_pts, N_objcontact)
+                distances = torch.cdist(points_in_plane, self.point_contacts) + torch.abs(contact_plane_distance[...,None])/10 # (N, N_pts, 3) and (N, N_objcontact, 3) -> (N, N_pts, N_objcontact)
+            else:
+                distances = torch.cdist(points_in_cam, self.point_contacts) # (N, N_pts, 3) and (N, N_objcontact, 3) -> (N, N_pts, N_objcontact)
+            dist_to_closest_obj_pt, obj_pt_indices = distances.min(dim=1)  # (N, N_objcontact)
             loss += torch.mean(dist_to_closest_obj_pt) * self.cfg.losses.point_contact_loss.weight
             losses_values['point_contact'] = torch.mean(dist_to_closest_obj_pt).item()
 
