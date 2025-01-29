@@ -1,5 +1,6 @@
 import argparse
 import cv2
+from glob import glob
 import imageio
 from matplotlib import pyplot as plt
 import numpy as np
@@ -251,8 +252,11 @@ class RefinePose:
                 #     tmp_mask = obj_mask.detach().cpu().numpy().astype(float) - mask.detach().cpu().numpy()
                 for mask_idx, (obj_mask, mask) in enumerate(zip(obj_masks, masks)):
                     tmp_mask = obj_mask.detach().cpu().numpy().astype(float) - mask
-                    mask_images[mask_idx].append(
-                        (255*(tmp_mask - tmp_mask.min()) / (tmp_mask.max() - tmp_mask.min()))[0].astype(np.uint8))
+                    if (tmp_mask.max() - tmp_mask.min()) == 0.:
+                        mask_images[mask_idx].append(np.zeros(tmp_mask.shape, dtype=np.uint8)[0])
+                    else:
+                        mask_images[mask_idx].append(
+                            (255*(tmp_mask - tmp_mask.min()) / (tmp_mask.max() - tmp_mask.min()))[0].astype(np.uint8))
 
             pbar.set_description("LOSSES: {}".format(
                 " | ".join([f"{name}: {np.array(loss_val).sum():.3f}"
@@ -271,7 +275,10 @@ class RefinePose:
                 ) / torch.sum(union) # Corresponds to 1 - IoU
 
             # if loss.item() < scene_early_stopping_loss:
-            iou = (1. - iou_loss).sum().item()
+            iou = torch.where(
+                torch.tensor(self.model.renderer.active_objects).to(device),
+                (1. - iou_loss),
+                torch.zeros(1).to(device)).sum().item()
             if iou > sum(self.model.renderer.active_objects) * self.cfg.iou_early_stopping:
                 if not self.debug_flag:
                     out_np = image_est[..., :3].cpu().detach().squeeze().numpy()
@@ -279,11 +286,21 @@ class RefinePose:
                     optim_images.append((255*blended).astype(np.uint8))
                 break
 
+        self.last_iter = i
+
         if self.debug_flag:
+            print('Generating debug images ...')
             imageio.mimsave(
                 os.path.join(self.cfg.debug_path, "optim.gif"),
                 optim_images, fps=5)
+
+            for old_fname in glob(os.path.join(self.cfg.debug_path, 'mask-*.gif')):
+                os.remove(old_fname)
+
             for obj_idx, obj_mask_images in enumerate(mask_images):
+                if not self.model.renderer.active_objects[obj_idx]:
+                    continue
+
                 imageio.mimsave(
                     os.path.join(
                         self.cfg.debug_path,
@@ -300,6 +317,7 @@ class RefinePose:
             predicted_poses.append(pose)
 
         if self.debug_flag:
+            print('Preparing 3D visualization ...')
             mesh2 = o3d.geometry.TriangleMesh()
             mesh2.vertices = o3d.utility.Vector3dVector(self.model.renderer.scene_transformed.verts_packed().detach().cpu().numpy())
             mesh2.triangles = o3d.utility.Vector3iVector(self.model.renderer.scene_transformed.faces_packed().detach().cpu().numpy())
