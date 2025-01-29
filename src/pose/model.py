@@ -1,6 +1,7 @@
 import numpy as np
 import open3d as o3d
 import os
+import time
 import torch
 import torch.nn as nn
 from torchvision.ops import masks_to_boxes
@@ -72,7 +73,9 @@ class OptimizationModel(nn.Module):
         self.ref_rays = []
         self.ref_contour_masks = []
         self.ref_contour_rays = []
-        bboxes = masks_to_boxes(torch.stack(masks))
+
+        if self.cfg.pre_refinement == 'bbox':
+            bboxes = masks_to_boxes(torch.stack(masks))
         for obj_idx, mask in enumerate(masks):
             # Convert mask pixels to rays
             x,y,z = self.mask_to_rays(mask)
@@ -191,6 +194,8 @@ class OptimizationModel(nn.Module):
                     valid_mask[..., :MAX_FACE],  # Only consider the MAX_FACE closest faces
                     obj_masks[ray_idx][..., None])
                 obj_pix_position = pix_position[obj_face_mask]
+                # obj_pix_position = obj_pix_position[torch.randperm(obj_pix_position.shape[0])[:10000]]
+                # rays = rays[torch.randperm(rays.shape[0])[:2000]]
 
                 if len(obj_pix_position) == 0:
                     print("WARNING: object mesh {} outside of camera frustum or hidden".format(
