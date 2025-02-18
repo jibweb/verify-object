@@ -24,8 +24,13 @@ def load_objects_models(mesh_names, objects_path, obj_idx_keys, cmap, mesh_num_s
             verts_features=torch.from_numpy(cmap[oi][:3])[None, None, :]
                                     .expand(-1, verts.shape[0], -1).type_as(verts))
 
+        if type(scale) == list:
+            obj_scale = scale[oi]
+        else:
+            obj_scale = scale
+
         mesh = Meshes(
-            verts=[verts/scale],
+            verts=[verts/obj_scale],
             faces=[faces_idx],
             textures=textures)
 
@@ -41,7 +46,7 @@ def load_objects_models(mesh_names, objects_path, obj_idx_keys, cmap, mesh_num_s
             norms = mesh_sampled_down.face_normals
             samples = trimesh.sample.sample_surface_even(mesh_sampled_down, mesh_num_samples) # either exactly NUM_samples, or <= NUM_SAMPLES --> pad by random.choice
             samples_norms = norms[samples[1]] # Norms pointing out of the object
-            samples_point_norm = np.concatenate((np.asarray(samples[0]/scale), np.asarray(0-samples_norms)), axis=1)
+            samples_point_norm = np.concatenate((np.asarray(samples[0]/obj_scale), np.asarray(0-samples_norms)), axis=1)
             if samples_point_norm.shape[0] < mesh_num_samples:  # NUM_SAMPLES not equal to mesh_num_samples -> padding
                 idx = np.random.choice(samples_point_norm.shape[0], mesh_num_samples - samples_point_norm.shape[0])
                 samples_point_norm = np.concatenate((samples_point_norm, samples_point_norm[idx]), axis=0)

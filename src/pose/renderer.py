@@ -72,7 +72,7 @@ class Renderer(nn.Module):
             image_size=(height, width),
             blur_radius= 0., #np.log(1. / 1e-4 - 1.) * blend_params.sigma,
             faces_per_pixel=faces_per_pixel,
-            max_faces_per_bin=20000,
+            max_faces_per_bin=30000,
             # perspective_correct=True,
         )
         lights = PointLights(device=device, location=((0.0, 0.0, 0.0),), ambient_color=((1.0, 1.0, 1.0),),

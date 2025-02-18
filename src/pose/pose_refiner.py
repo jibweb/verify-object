@@ -38,11 +38,14 @@ class RefinePose:
 
         # load all meshes that will be needed
         self.cmap = plt.cm.tab20(range(20)) # 20 different colors, two consecutive ones are similar (for two instances)
+        scale = 1000
         if cfg.objects_loader == 'bop':
             meshes_fns = ["obj_{:06d}.obj".format(obj_id) for obj_id in objects_names]
         elif cfg.objects_loader == '3d-dat':
             with open(os.path.join(cfg.objects_path, "object_library.yaml")) as fp:
                 objects_dict = yaml.safe_load(fp)
+
+            scale = [1. / obj['scale'] for obj in objects_dict]
 
             if objects_names is not None:
                 meshes_fns = [obj['mesh'] for obj in objects_dict if obj['id'] in objects_names]
@@ -58,7 +61,8 @@ class RefinePose:
                 cfg.objects_path,
                 obj_idx_keys=objects_names,
                 cmap=self.cmap,
-                mesh_num_samples=cfg.mesh_num_samples)
+                mesh_num_samples=cfg.mesh_num_samples,
+                scale=scale)
 
         self.init(
             cfg, intrinsics,
@@ -96,6 +100,10 @@ class RefinePose:
         kernel = np.ones((3,3),np.uint8)
         refined_masks = []
         for mask in tqdm(masks, desc='Mask refinement with GrabCut'):
+            if (mask == 0).all():
+                refined_masks.append(mask)
+                continue
+
             obj_mask = mask.astype(np.uint8)
             erosion = cv2.erode(obj_mask, kernel, iterations=1)
             dilation = cv2.dilate(obj_mask, kernel, iterations=1)
@@ -142,16 +150,24 @@ class RefinePose:
             reference_width, reference_height,
             to_meters=1e-3,
             distance_threshold=0.01)
-        cloud = plane_det.create_point_cloud(
-            rgb, depth, intrinsics, max_dist=1.5)
-        if self.plane_normal is None or self.plane_pt is None:
+        try:
+            cloud = plane_det.create_point_cloud(
+                rgb, depth, intrinsics, max_dist=1.5)
+        except Exception as e:
+            print("ERROR", e)
+            cloud = o3d.geometry.PointCloud()
+
+        if self.cfg.optim.losses.plane_collision_loss.active and (self.plane_normal is None or self.plane_pt is None):
             plane_T, plane, scene, indices = plane_det.detect(cloud)
 
             self.plane_normal = plane_T[:,2][:3].astype(np.float32)
             self.plane_pt = np.asarray(plane.points[0].astype(np.float32))
         else:
-            plane, scene = plane_det.filter_plane(
-                cloud, self.plane_normal, self.plane_pt)
+            if self.plane_normal is not None and self.plane_pt is not None:
+                plane, scene = plane_det.filter_plane(
+                    cloud, self.plane_normal, self.plane_pt)
+            else:
+                scene = cloud
 
         # Create the filtered scene depth image
         scene_depth = project_point_cloud(
