@@ -7,7 +7,7 @@ import torch
 from tqdm import tqdm
 import yaml
 
-from pose_refiner import RefinePose
+from pose.pose_refiner import RefinePose
 from config import config
 from matplotlib import pyplot as plt
 import cv2
@@ -15,7 +15,8 @@ import cv2
 from actionlib import SimpleActionServer
 import rospy
 import ros_numpy
-from geometry_msgs.msg import PoseArray, Pose
+import tf2_ros
+from geometry_msgs.msg import PoseArray, Pose, TransformStamped
 from sensor_msgs.msg import Image, CameraInfo, RegionOfInterest
 from tracebot_msgs.msg import VerifyObjectAction, VerifyObjectGoal, VerifyObjectResult
 
@@ -36,6 +37,11 @@ INTERNAL_TO_PROJECT_NAMES = {
     10: "RedClamp",
     11: "NeedleNeedleCap",
     # 'container': 'Canister',
+
+    # CEA Gripper
+    12: "distal_phalanx",
+    13: "intermediate_phalanx",
+    14: "proximal_phalanx",
 }
 
 OBJECTS_TO_OPTIMIZE = {
@@ -50,6 +56,11 @@ OBJECTS_TO_OPTIMIZE = {
     "WhiteClamp": True,
     "RedClamp": True,
     "NeedleNeedleCap": True,
+
+    # CEA Gripper
+    "distal_phalanx": False,
+    "intermediate_phalanx": False,
+    "proximal_phalanx": False,
 }
 
 STABLE_AXIS = {
@@ -64,6 +75,11 @@ STABLE_AXIS = {
     "WhiteClamp": [0,0,0],
     "RedClamp": [0,0,0],
     "NeedleNeedleCap": [0,0,0],
+
+    # CEA Gripper
+    "distal_phalanx": [0,0,0],
+    "intermediate_phalanx": [0,0,0],
+    "proximal_phalanx": [0,0,0],
 }
 
 PROJECT_TO_INTERNAL_NAMES = {
@@ -85,6 +101,21 @@ SUPPORTED_OBJECTS = INTERNAL_TO_PROJECT_NAMES.keys()
 RELATIVE_POSES = {
     'cap_to_needle': (np.eye(3), np.zeros(3))
 }
+
+GRIPPER_JOINTS = [
+    "tracebot_right_gripper_distal_phalanx_1",
+    "tracebot_right_gripper_distal_phalanx_2",
+    "tracebot_right_gripper_distal_phalanx_3",
+    "tracebot_right_gripper_distal_phalanx_4",
+    "tracebot_right_gripper_intermediate_phalanx_1",
+    "tracebot_right_gripper_intermediate_phalanx_2",
+    "tracebot_right_gripper_intermediate_phalanx_3",
+    "tracebot_right_gripper_intermediate_phalanx_4",
+    "tracebot_right_gripper_proximal_phalanx_1",
+    "tracebot_right_gripper_proximal_phalanx_2",
+    "tracebot_right_gripper_proximal_phalanx_3",
+    "tracebot_right_gripper_proximal_phalanx_4",
+]
 
 
 def get_bbox_iou(bb1, bb2):
@@ -153,6 +184,9 @@ class ROSPoseVerifier(RefinePose):
                 '/locateobject/detection_threshold',
                 0.5)
 
+        self.tfBuffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.tfBuffer)
+
         self.viz_pub = rospy.Publisher(f"{name}/debug_visualization", Image, queue_size=10, latch=True)
         self.contact_pts = None
 
@@ -220,7 +254,30 @@ class ROSPoseVerifier(RefinePose):
 
         if contact_pts is not None and len(contact_pts) != 0:
             self.contact_pts = np.array([[pose.position.x, pose.position.y, pose.position.z] for pose in contact_pts]).astype(np.float32)
-        # TODO: Add gripper CAD in the scene
+
+        # Add gripper CAD in the scene
+        try:
+            empty_mask = ros_numpy.msgify(
+                Image,
+                np.zeros((goal.color_image.height, goal.color_image.width), dtype=np.float32),
+                encoding='32FC1',
+            )
+            for joint in GRIPPER_JOINTS:
+                trans = self.tfBuffer.lookup_transform("tracebot_right_arm_tool0", joint, rospy.Time(), rospy.Duration(5))
+
+                goal.object_types.append('_'.join(joint.split('_')[3:5]))
+                joint_pose = Pose()
+                joint_pose.position.x = trans.transform.translation.x
+                joint_pose.position.y = trans.transform.translation.y
+                joint_pose.position.z = trans.transform.translation.z
+                joint_pose.orientation = trans.transform.rotation
+                goal.object_poses.append(joint_pose)
+                goal.bounding_boxes.append(RegionOfInterest())
+                goal.confidences = list(goal.confidences) + [1.]
+                goal.object_masks.append(empty_mask)
+
+        except Exception as e:
+            print(e)
 
         result = self.generic_callback(goal)
 
