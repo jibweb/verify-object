@@ -51,7 +51,7 @@ OBJECTS_TO_OPTIMIZE = {
     "NeedleCap": True,
     "RedPlug": True,
     "Canister": True,
-    "LargeBottle": False,
+    "LargeBottle": True,
     "YellowPlug": True,
     "WhiteClamp": True,
     "RedClamp": True,
@@ -179,6 +179,7 @@ class ROSPoseVerifier(RefinePose):
         self.contact_pts_right_topic = '/tracebot_right_gripper_contacts_camera_frame'
         rospy.loginfo(f"[{name}] Waiting for camera info ...")
         self.camera_info = rospy.wait_for_message(self.camera_info_topic, CameraInfo)
+        self.K = np.array(self.camera_info.K).reshape((3,3))
         rospy.loginfo(f"[{name}] Camera info received")
         self.det_threshold = rospy.get_param(
                 '/locateobject/detection_threshold',
@@ -255,6 +256,26 @@ class ROSPoseVerifier(RefinePose):
         if contact_pts is not None and len(contact_pts) != 0:
             self.contact_pts = np.array([[pose.position.x, pose.position.y, pose.position.z] for pose in contact_pts]).astype(np.float32)
 
+        # Boost LargeBottle when too close to the camera
+        confidences = list(goal.confidences)
+        for obj_idx, scene_obj in enumerate(goal.object_types):
+            if self.contact_pts is not None:
+                us, vs = self.project_points(
+                    self.contact_pts[:,0],
+                    self.contact_pts[:,1],
+                    self.contact_pts[:,2])
+                if np.vstack((
+                    us > goal.bounding_boxes[obj_idx].x_offset,
+                    us < goal.bounding_boxes[obj_idx].x_offset + goal.bounding_boxes[obj_idx].width,
+                    vs > goal.bounding_boxes[obj_idx].y_offset,
+                    vs < goal.bounding_boxes[obj_idx].y_offset + goal.bounding_boxes[obj_idx].height)).all():
+                    confidences[obj_idx] = self.det_threshold + 0.01
+                    self.cfg.optim.losses.plane_collision_loss.active = True
+                    self.cfg.optim.losses.plane_collision_loss.weight = 0.5
+                    self.cfg.optim.losses.point_contact_loss.weight = 2.5
+                    self.cfg.optim.losses.silhouette_loss.weight = 0.2
+        goal.confidences = confidences
+
         # Add gripper CAD in the scene
         try:
             empty_mask = ros_numpy.msgify(
@@ -263,7 +284,7 @@ class ROSPoseVerifier(RefinePose):
                 encoding='32FC1',
             )
             for joint in GRIPPER_JOINTS:
-                trans = self.tfBuffer.lookup_transform("tracebot_right_arm_tool0", joint, rospy.Time(), rospy.Duration(5))
+                trans = self.tfBuffer.lookup_transform("tracebot_right_arm_tool0", joint, rospy.Time(), rospy.Duration(3))
 
                 goal.object_types.append('_'.join(joint.split('_')[3:5]))
                 joint_pose = Pose()
@@ -298,6 +319,12 @@ class ROSPoseVerifier(RefinePose):
             masks.append(mask.astype(bool))
 
         return masks
+
+    def project_points(self, x, y, z):
+        return (
+            x * self.K[0,0] / z + self.K[0,2],
+            y * self.K[1,1] / z + self.K[1,2]
+        )
 
     def generic_callback(self, goal):
         plane_normal = rospy.get_param('/locateobject/plane_normal', [])
@@ -397,9 +424,6 @@ class ROSPoseVerifier(RefinePose):
                 result.confidences.append(1.)
                 obj_name = 4
 
-            if obj_name in [2,7]: # Replacing Small and Large bottle detections with Medium ones
-                obj_name = 1
-
             result.object_types.append(INTERNAL_TO_PROJECT_NAMES[obj_name])
             result.object_poses.append(ros_numpy.msgify(Pose, predicted_poses[obj_idx]))
             # result.bounding_boxes = bounding_boxes
@@ -418,6 +442,8 @@ class ROSPoseVerifier(RefinePose):
             bbox.height = bounding_boxes[obj_idx][3] - bounding_boxes[obj_idx][1]
             result.bounding_boxes.append(bbox)
             result.confidences.append(1.)
+
+        rospy.loginfo("[verify_object] Optimization finished")
 
         return result
 
