@@ -34,6 +34,23 @@ INTERNAL_TO_PROJECT_NAMES = {
     "intermediate_phalanx": "intermediate_phalanx",
     "proximal_phalanx": "proximal_phalanx",
     # 'container': 'Canister',
+
+    # Keypose
+    'ball_0': 'ball_0',
+    'bottle_1': 'bottle_1',
+    'cup_0': 'cup_0',
+    'heart_0': 'heart_0',
+    'mug_1': 'mug_1',
+    'mug_3': 'mug_3',
+    'mug_5': 'mug_5',
+    'tree_0': 'tree_0',
+    'bottle_0': 'bottle_0',
+    'bottle_2': 'bottle_2',
+    'cup_1': 'cup_1',
+    'mug_0': 'mug_0',
+    'mug_2': 'mug_2',
+    'mug_4': 'mug_4',
+    'mug_6': 'mug_6',
 }
 
 
@@ -51,6 +68,23 @@ OBJECTS_TO_OPTIMIZE = {
     "distal_phalanx": False,
     "intermediate_phalanx": False,
     "proximal_phalanx": False,
+
+    # Keypose
+    "ball_0": True,
+    "bottle_1": True,
+    "cup_0": True,
+    "heart_0": True,
+    "mug_1": True,
+    "mug_3": True,
+    "mug_5": True,
+    "tree_0": True,
+    "bottle_0": True,
+    "bottle_2": True,
+    "cup_1": True,
+    "mug_0": True,
+    "mug_2": True,
+    "mug_4": True,
+    "mug_6": True,
 }
 
 
@@ -126,12 +160,13 @@ def get_masks(scene_path, objects, rgb_paths, mask_method=None):
         mask_paths.append([])
 
         for obj_idx, (obj, obj_pose) in enumerate(objects):
-            mask_path = f"{obj.id}__{obj_idx:03d}__{os.path.basename(rgb_path)}"
+            mask_path = f"{obj.id}__{obj_idx:03d}__{os.path.basename(rgb_path.replace('.jpg', '.png'))}"
             gt_path = os.path.join(scene_path, 'masks', mask_path)
             if os.path.isfile(gt_path):
                 mask_gts[-1].append(gt_path)
             else:
-                raise Exception('Missing groundtruth mask {}'.format(gt_path))
+                print('Missing groundtruth mask {}'.format(gt_path))
+                # raise Exception('Missing groundtruth mask {}'.format(gt_path))
 
             if mask_method:
                 method_path = os.path.join(
@@ -141,6 +176,7 @@ def get_masks(scene_path, objects, rgb_paths, mask_method=None):
                 if os.path.isfile(method_path):
                     mask_paths[-1].append(method_path)
                 else:
+                    print('Missing method mask {}'.format(method_path))
                     mask_paths[-1].append(None)
             else:
                 mask_paths[-1].append(gt_path)
@@ -185,6 +221,9 @@ if __name__ == "__main__":
             scene_file_reader.scenes_dir,
             scene_id)
 
+        if not os.path.exists(os.path.join(scene_path, 'refinement_res')):
+            os.mkdir(os.path.join(scene_path, 'refinement_res'))
+
         if args.exp_name:
             exp_name = args.exp_name
         else:
@@ -210,11 +249,21 @@ if __name__ == "__main__":
         # rgb_paths = scene_file_reader.get_images_rgb_path(scene_id)
         rgb_paths = v4r.io.get_file_list(
             os.path.join(scene_path, scene_file_reader.rgb_dir), ('.png',))
+        if len(rgb_paths) == 0:
+            rgb_paths = v4r.io.get_file_list(
+                os.path.join(scene_path, scene_file_reader.rgb_dir), ('.jpg',))
         rgb_paths.sort()
         sensor_depth_paths = scene_file_reader.get_images_depth_path(scene_id)
         contact_pts_paths = v4r.io.get_file_list(
             os.path.join(scene_path, 'contact_pts'), ('.txt',))
         contact_pts_paths.sort()
+
+        if os.path.exists(os.path.join(scene_path, 'plane_info.txt')):
+            with open(os.path.join(scene_path, 'plane_info.txt')) as fp:
+                lines = fp.readlines()
+                plane_info = [[float(val) for val in l.split()] for l in lines]
+            plane_pts = [info[:3] for info in plane_info]
+            plane_normals = [info[3:6] for info in plane_info]
 
         mask_gts, mask_paths = get_masks(
             scene_path,
@@ -241,21 +290,24 @@ if __name__ == "__main__":
 
             # Compute object diagonal length to weigh the translation noise
             for obj_internal, obj_mesh in pose_refiner.model.renderer.meshes.items():
-                print("Object sizes processing:", obj_internal)
                 objects_sizes[obj_internal] = (obj_mesh.verts_packed().max(dim=0).values - obj_mesh.verts_packed().min(dim=0).values).pow(2).sum().sqrt().cpu().numpy()
+                print("Object sizes processing:", obj_internal, objects_sizes[obj_internal])
         elif args.pose_method == 'icp':
             pose_refiner = ICPRefiner(
                 cfg,
                 intrinsics.copy(),
                 width, height,
                 objects_names=None,  # Load all models of the object_library in 3d-dat mode
-                objects_to_optimize=OBJECTS_TO_OPTIMIZE
+                objects_to_optimize=OBJECTS_TO_OPTIMIZE,
+                debug_flag=args.debug,
             )
 
             # Compute object diagonal length to weigh the translation noise
             for obj_internal, obj_mesh in pose_refiner.obj_pcds.items():
                 bbox = obj_mesh.get_axis_aligned_bounding_box()
                 objects_sizes[obj_internal] = np.sqrt(np.power(bbox.max_bound - bbox.min_bound, 2).sum())
+                print("Object sizes processing:", obj_internal, objects_sizes[obj_internal])
+
         elif args.pose_method == 'megapose':
             pose_refiner = MegaposeRefiner(
                 cfg,
@@ -269,24 +321,30 @@ if __name__ == "__main__":
             for obj_internal, obj_mesh in pose_refiner.obj_pcds.items():
                 bbox = obj_mesh.get_axis_aligned_bounding_box()
                 objects_sizes[obj_internal] = np.sqrt(np.power(bbox.max_bound - bbox.min_bound, 2).sum())
+                print("Object sizes processing:", obj_internal, objects_sizes[obj_internal])
 
         for rgb_idx, rgb_path in enumerate(rgb_paths):
             if '00012.png' in rgb_path:
                 continue
 
-            depth_path = sensor_depth_paths[rgb_idx]
-            depth_path = depth_path.replace("depth", args.depth_method)
             cam_tf = tool_cam_poses[rgb_idx]
             img_mask_paths = mask_paths[rgb_idx]
             img_nb = int(rgb_path.split('.')[-2].split('/')[-1])
 
             gt_poses = [np.dot(np.linalg.inv(cam_tf), pose).astype(np.float32) for pose in gt_poses_tool]
             rgb = cv2.imread(rgb_path)
-            depth = cv2.imread(depth_path, -1)
+            try:
+                depth_path = sensor_depth_paths[rgb_idx]
+                depth_path = depth_path.replace("depth", args.depth_method)
+                depth = cv2.imread(depth_path, -1)
+            except:
+                print('Missing depth map corresponding to ', rgb_path)
+                depth = np.zeros((height, width), dtype=np.uint16)
             empty_mask = np.zeros((height, width), dtype=bool)
             ref_masks = []
             mask_validity = []
             for mask_path in img_mask_paths:
+                # print(mask_path)
                 if mask_path:
                     ref_masks.append(cv2.imread(mask_path, -1).astype(bool))
                     mask_validity.append(True)
@@ -304,6 +362,15 @@ if __name__ == "__main__":
                     for pt in contact_pts]).astype(np.float32)
             else:
                 contact_pts_cam = None
+
+            try:
+                pose_refiner.plane_normal = plane_normals[rgb_idx]
+                pose_refiner.plane_pt = plane_pts[rgb_idx]
+            except Exception as e:
+                print('ERROR', e)
+                pose_refiner.plane_normal = None
+                pose_refiner.plane_pt = None
+
 
             #TODO: save noise profile properly
             noise_sample_path = os.path.join(
@@ -383,10 +450,18 @@ if __name__ == "__main__":
                         init_poses.append(init_pose.astype(np.float32))
 
                 if args.pose_method == 'diffrend':
-                    predicted_poses, ref_rgb, ref_depth, rend_masks, viz_img = pose_refiner.optimize(
-                        rgb, depth, scene_objects, init_poses, ref_masks, point_contacts=contact_pts_cam)
+                    try:
+                        predicted_poses, ref_rgb, ref_depth, rend_masks, viz_img = pose_refiner.optimize(
+                            rgb, depth, scene_objects, init_poses, ref_masks, point_contacts=contact_pts_cam)
+                        img_results['iter_nb'].append(pose_refiner.last_iter)
+                    except Exception as e:
+                        predicted_poses = init_poses
+                        img_results['iter_nb'].append(-1)
+                        print(e)
+
                     img_results['iter_nb'].append(pose_refiner.last_iter)
                 elif args.pose_method in ['icp', 'megapose']:
+                    print(args.pose_method, 'Optimizing...')
                     predicted_poses = pose_refiner.optimize(
                         rgb, depth, scene_objects, init_poses, ref_masks)
 
