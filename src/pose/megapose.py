@@ -5,6 +5,7 @@ import open3d as o3d
 import os
 from scipy.spatial.transform import Rotation
 import subprocess
+from time import time
 import yaml
 
 MEGAPOSE_DIR = "/home/jbweibel/code/megapose6d"
@@ -48,6 +49,7 @@ class MegaposeRefiner:
 
 
     def optimize(self, rgb, depth, scene_objects, init_poses, ref_masks):
+        start = time()
         cv2.imwrite(os.path.join(IN_HAND_DIR, 'image_rgb.png'), rgb)
         cv2.imwrite(os.path.join(IN_HAND_DIR, 'image_depth.png'), depth)
 
@@ -71,14 +73,19 @@ class MegaposeRefiner:
             # Run megapose
             # source /conda/bin/activate && python -m megapose.scripts.run_inference_on_example tracebot_inhand --run-inference --init-pose "0.98613097 -0.0745836 0.14826675 0.21597066 0.07227096 -0.61122766 -0.78814825 -0.19318982 0.14940768 0.78793282 -0.5973603 0.98283673 0. 0. 0. 1."
             # subprocess.run([
+
+            # Run in another terminal:
+            # docker run -it --gpus all --rm -e MEGAPOSE_DATA_DIR=/code/data -v /home/jbweibel/code/megapose6d:/code --name megapose_exp megapose-runner bash
+            # docker run -it --gpus all --rm -e MEGAPOSE_DATA_DIR=/code/data -v /home/jbweibel/code/megapose6d:/code --name megapose_exp megapose-runner /bin/bash -c 'source /conda/bin/activate && python -m megapose.scripts.run_inference_on_example tracebot_inhand --run-inference'
+            init_pose_str = ' '.join(init_poses[obj_idx].flatten().astype(str).tolist())
+            print(init_pose_str)
             subprocess.run(
-                "docker run -it --gpus all " \
-                "-e MEGAPOSE_DATA_DIR=/code/data " \
-                "-v {}:/code megapose-runner " \
-                "/bin/bash -c 'source /conda/bin/activate && python -m megapose.scripts.run_inference_on_example tracebot_inhand --run-inference --init-pose \"{}\"'".format(
-                    MEGAPOSE_DIR,
-                    ' '.join(init_poses[obj_idx].flatten().astype(str).tolist())
-                ),
+                # "docker run -it --gpus all " \
+                # "-e MEGAPOSE_DATA_DIR=/code/data " \
+                # "-v {}:/code megapose-runner " \
+                "docker exec -it megapose_exp " \
+                "/bin/bash -c 'python3 /code/src/megapose/scripts/run_client.py --init-pose \"{}\"'".format(init_pose_str),
+                # "/bin/bash -c 'source /conda/bin/activate && python -m megapose.scripts.run_inference_on_example tracebot_inhand --run-inference --init-pose \"{}\"'".format(init_pose_str),
                 shell=True
             )
 
@@ -89,5 +96,7 @@ class MegaposeRefiner:
             pose[:3,:3] = Rotation.from_quat(output[0]['TWO'][0]).as_matrix()
             pose[:3,3] = output[0]['TWO'][1]
             predicted_poses.append(pose)
+
+        print('Optimization in', time()-start)
 
         return predicted_poses
